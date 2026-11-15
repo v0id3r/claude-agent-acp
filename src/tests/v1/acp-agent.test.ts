@@ -568,7 +568,8 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
       }
       // Accept the first option of every choice field (skip the free-text one).
       const content: Record<string, string | string[]> = {};
-      for (const [key, prop] of Object.entries(params.requestedSchema.properties ?? {})) {
+      const schema = params.requestedSchema as { properties?: Record<string, unknown> };
+      for (const [key, prop] of Object.entries(schema.properties ?? {})) {
         if (key === "customAnswer") continue;
         const p = prop as {
           oneOf?: Array<{ const: string }>;
@@ -5568,7 +5569,6 @@ describe("permission request cancellation", () => {
       emitRawSDKMessages: false,
       forwardSubagentText: false,
       contextWindowSize: 1_000_000,
-      contextWindowAuthoritative: false,
       providerCacheKey: "default",
       taskState: new Map(),
       subagentChecklists: new Set(),
@@ -12897,9 +12897,7 @@ describe("stop reason propagation", () => {
     );
     expect(JSON.stringify(updates)).not.toContain("agent_message_chunk");
     const usageUpdates = updates.filter((update) => update.update.sessionUpdate === "usage_update");
-    expect(usageUpdates.at(-1)?.update).toEqual(
-      expect.objectContaining({ used: 170910, size: 1_000_000 }),
-    );
+    expect(usageUpdates.at(-1)?.update).toEqual(expect.objectContaining({ used: 170910, size: 0 }));
   });
 
   it("keeps the prior turn's context usage when a fresh turn is refused for quota", async () => {
@@ -16024,7 +16022,6 @@ describe("session/close", () => {
       emitRawSDKMessages: false,
       forwardSubagentText: false,
       contextWindowSize: 1_000_000,
-      contextWindowAuthoritative: false,
       providerCacheKey: "default",
       taskState: new Map(),
       subagentChecklists: new Set(),
@@ -16149,7 +16146,6 @@ describe("session/delete", () => {
       emitRawSDKMessages: false,
       forwardSubagentText: false,
       contextWindowSize: 1_000_000,
-      contextWindowAuthoritative: false,
       providerCacheKey: "default",
       taskState: new Map(),
       subagentChecklists: new Set(),
@@ -16315,7 +16311,6 @@ describe("getOrCreateSession param change detection", () => {
       emitRawSDKMessages: false,
       forwardSubagentText: false,
       contextWindowSize: 1_000_000,
-      contextWindowAuthoritative: false,
       providerCacheKey: "default",
       taskState: new Map(),
       subagentChecklists: new Set(),
@@ -16887,8 +16882,8 @@ describe("usage_update computation", () => {
     expect(usageUpdates).toHaveLength(2);
     expect(usageUpdates[0].update.used).toBe(1800);
     // First prompt of a session has no prior result to learn the window from,
-    // so the mid-stream update falls back to the default context window.
-    expect(usageUpdates[0].update.size).toBe(1_000_000);
+    // so the mid-stream update keeps its context window unknown.
+    expect(usageUpdates[0].update.size).toBe(0);
     expect(usageUpdates[0].update.cost).toBeUndefined();
     expect(usageUpdates[1].update.used).toBe(1800);
     expect(usageUpdates[1].update.size).toBe(200000);
@@ -17108,7 +17103,7 @@ describe("usage_update computation", () => {
     // When the user switches models mid-session, the window learned for the
     // previous model would otherwise persist into the next prompt's first
     // mid-stream update. applyConfigOptionValue should reset it so the next
-    // turn's first update falls back to the default window.
+    // turn's first update keeps the new window unknown.
     const { agent, updates } = createMockAgentWithCapture();
     injectSession(agent, [
       createStreamEvent("message_start", {
@@ -17152,7 +17147,7 @@ describe("usage_update computation", () => {
 
     const usageUpdates = updates.filter((u: any) => u.update?.sessionUpdate === "usage_update");
     expect(usageUpdates).toHaveLength(2);
-    expect(usageUpdates[0].update.size).toBe(1_000_000);
+    expect(usageUpdates[0].update.size).toBe(0);
     expect(usageUpdates[1].update.size).toBe(967000);
   });
 
@@ -17306,6 +17301,46 @@ describe("usage_update computation", () => {
     expect(usageUpdate).toBeDefined();
     // size should be 1000000 (Opus), not 200000 (min of both)
     expect(usageUpdate.update.size).toBe(1000000);
+  });
+
+  it("does not borrow a window from another model with a shared name prefix", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createAssistantMessage({ model: "claude-haiku-4-5-20251001" }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-20250514": {
+            inputTokens: 100,
+            outputTokens: 50,
+            cacheReadInputTokens: 20,
+            cacheCreationInputTokens: 10,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+          "claude-sonnet-4-20250514": {
+            inputTokens: 50,
+            outputTokens: 25,
+            cacheReadInputTokens: 10,
+            cacheCreationInputTokens: 5,
+            webSearchRequests: 0,
+            costUSD: 0.005,
+            contextWindow: 200000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    agent.sessions["test-session"].contextWindowSize = 0;
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdate).toBeDefined();
+    expect(usageUpdate.update.size).toBe(0);
   });
 
   it("after model switch, size updates to the new model's window", async () => {
@@ -17722,7 +17757,6 @@ describe("usage_update computation", () => {
     const RESOLVED_ID = "claude-provkey-probe[1m]";
     const { agent } = createMockAgentWithCapture();
 
-    // Provider-A session learns the authoritative window on a turn.
     injectSession(agent, [
       createAssistantMessage({ model: "claude-provkey-probe" }),
       createResultMessageWithModel({
@@ -17785,9 +17819,8 @@ describe("usage_update computation", () => {
       configId: "model",
       value: "alias",
     });
-    expect(agent.sessions["session-B"]!.contextWindowSize).toBe(1_000_000);
+    expect(agent.sessions["session-B"]!.contextWindowSize).toBe(0);
 
-    // The SAME provider (A) switching to that id DOES read the cached window.
     sessionA.contextWindowSize = 123_456; // sentinel
     sessionA.models = { currentModelId: "default", availableModels: [] };
     sessionA.modelInfos = modelInfos as any;
@@ -17801,10 +17834,6 @@ describe("usage_update computation", () => {
   });
 
   it("ignores a nonsensical (non-positive) reported window: keeps the prior window and doesn't poison the cache", async () => {
-    // A result.modelUsage that reports a non-positive contextWindow (observed
-    // from third-party backends) must not overwrite the window learned earlier,
-    // nor be written to the cross-session cache. Unique id keeps this isolated
-    // from other tests sharing the module-global cache (no resetModules here).
     const RESOLVED_ID = "claude-nonpositive-probe[1m]";
     const { agent } = createMockAgentWithCapture();
     injectSession(agent, [
@@ -17830,7 +17859,6 @@ describe("usage_update computation", () => {
 
     await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "go" }] });
 
-    // The bad window was ignored — the prior window is preserved.
     expect(session.contextWindowSize).toBe(900_000);
 
     // And it never reached the cache: a switch to that id falls to the
@@ -17855,7 +17883,7 @@ describe("usage_update computation", () => {
       configId: "model",
       value: "alias",
     });
-    expect(session.contextWindowSize).toBe(1_000_000);
+    expect(session.contextWindowSize).toBe(0);
   });
 
   it("caches the turn's window under the bare assistant-message id too, so resolvedModel-less rows can hit", async () => {
@@ -17894,7 +17922,6 @@ describe("usage_update computation", () => {
     // Switch to a row registered under the bare id with NO resolvedModel —
     // the shape of the out-of-allowlist resume row.
     session.contextWindowSize = 123_456; // sentinel
-    session.contextWindowAuthoritative = false;
     session.models = { currentModelId: "default", availableModels: [] };
     session.modelInfos = [{ value: BARE_ID, displayName: "Bare", description: "probe" }] as any;
     session.configOptions = [
@@ -17915,7 +17942,6 @@ describe("usage_update computation", () => {
     });
 
     expect(session.contextWindowSize).toBe(555_000);
-    expect(session.contextWindowAuthoritative).toBe(true);
   });
 });
 
@@ -20678,7 +20704,6 @@ describe("post-error recovery", () => {
       emitRawSDKMessages: false,
       forwardSubagentText: false,
       contextWindowSize: 1_000_000,
-      contextWindowAuthoritative: false,
       providerCacheKey: "default",
       taskState: new Map(),
       subagentChecklists: new Set(),
@@ -29342,7 +29367,6 @@ describe("session/cancel wedge recovery (issue #680)", () => {
       emitRawSDKMessages: false,
       forwardSubagentText: false,
       contextWindowSize: 1_000_000,
-      contextWindowAuthoritative: false,
       providerCacheKey: "default",
       taskState: new Map(),
       subagentChecklists: new Set(),
@@ -31255,7 +31279,6 @@ describe("agent selection config option", () => {
         emitRawSDKMessages: false,
         forwardSubagentText: false,
         contextWindowSize: 1_000_000,
-        contextWindowAuthoritative: false,
         providerCacheKey: "default",
         taskState: new Map(),
         subagentChecklists: new Set(),
@@ -31945,5 +31968,29 @@ describe("permission_denied", () => {
     );
 
     expect(denials(updates)).toHaveLength(1);
+  });
+});
+
+describe("MCP catalog refresh", () => {
+  it("reconnects the requested servers on the existing native query", async () => {
+    const agent = new ClaudeAcpAgent({ sessionUpdate: async () => {} } as unknown as AcpClient, {
+      log: () => {},
+      error: () => {},
+    });
+    const reconnectMcpServer = vi.fn(async (_name: string) => {});
+    const session = mockSessionState({ query: { reconnectMcpServer } });
+    agent.sessions["refresh-session"] = session;
+    await expect(
+      agent.refreshMcpServers({ sessionId: "refresh-session", serverNames: ["jaz_mcp"] }),
+    ).resolves.toEqual({});
+    expect(reconnectMcpServer).toHaveBeenCalledExactlyOnceWith("jaz_mcp");
+    expect(agent.sessions["refresh-session"]).toBe(session);
+    reconnectMcpServer.mockRejectedValueOnce(new Error("reconnect failed"));
+    await expect(
+      agent.refreshMcpServers({ sessionId: "refresh-session", serverNames: ["jaz_mcp"] }),
+    ).rejects.toThrow("reconnect failed");
+    await expect(
+      agent.refreshMcpServers({ sessionId: "missing", serverNames: ["jaz_mcp"] }),
+    ).rejects.toThrow("Unknown session");
   });
 });

@@ -176,12 +176,7 @@ export function buildConfigOptions(
       ),
     );
   }
-  const effort = buildEffortConfigOption(
-    modelInfos,
-    models.currentModelId,
-    currentEffortLevel,
-    presentation?.useRecommendedValue === true,
-  );
+  const effort = buildEffortConfigOption(modelInfos, models.currentModelId, currentEffortLevel);
   if (effort) options.push(effort);
 
   // Surface the Fast mode toggle only when the current model supports it. The
