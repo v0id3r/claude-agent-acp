@@ -11,7 +11,6 @@
  * session's v1-to-v2 translation. The session tells it where its turns start
  * and end.
  */
-import type { ContentBlock, PromptRequest } from "@agentclientprotocol/sdk/unstable";
 import type {
   ModelInfo,
   ModelUsage,
@@ -156,10 +155,6 @@ export class SessionReports {
       {
         client: { sessionUpdate: async (notification) => host.emit([notification]) },
         logger: host.logger,
-        get sessions() {
-          const session = host.titledSession();
-          return session ? { [host.sessionId]: session } : {};
-        },
       },
       host.sessionId,
     );
@@ -285,27 +280,14 @@ export class SessionReports {
   // --- Titles ----------------------------------------------------------------
 
   /**
-   * A client prompt came: it drops the armed idle compaction, and its text is
-   * for the title. The adapter's `/compact` is no client prompt.
+   * A client prompt drops the armed idle compaction and spends the prediction.
    */
-  promptSent(prompt: PromptRequest["prompt"]): void {
+  promptSent(): void {
     this.idleCompaction?.disarm("prompt");
-    this.titles.onPrompt(prompt);
     // The prediction is spent: the user sent it or something else. A turn
     // that predicts nothing (plan mode, an API error, the usage limit) then
     // leaves no stale prediction in the composer.
     this.sendSuggestions(this.suggestions?.clear());
-  }
-
-  /** The client prompt went to Claude Code, which may title the session from it. */
-  promptQueued(prompt: PromptRequest["prompt"]): void {
-    const session = this.host.titledSession();
-    if (session) this.titles.onPromptQueued(session, prompt);
-  }
-
-  /** A live agent text chunk of the root session, for the title. */
-  agentText(content: ContentBlock): void {
-    this.titles.onAssistantText(content);
   }
 
   /** The session and its title state, as a client rename sets it
