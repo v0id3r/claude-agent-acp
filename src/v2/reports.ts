@@ -2,12 +2,11 @@
  * The reports of a v2 session that are not Claude's output: the
  * context window and cost (`usage_update`), Claude Code's warnings and MCP startup failures (`notice`), compactions
  * (`compaction_update`), the title (`session_info_update`), the predicted
- * predicted follow-up prompt (`prompt_suggestions_update`, and AIR's `_meta.promptSuggestions`),
- * and the adapter's own idle compaction.
+ * predicted follow-up prompt (`prompt_suggestions_update`, and AIR's `_meta.promptSuggestions`).
  *
  * They are built as the v1 core builds them, from the shared modules
  * (`session-usage.ts`, `session-notices.ts`, `context-compaction.ts`,
- * `session-titles.ts`, `prompt-suggestions.ts`, `idle-compaction.ts`), and go out through the
+ * `session-titles.ts`, `prompt-suggestions.ts`), and go out through the
  * session's v1-to-v2 translation. The session tells it where its turns start
  * and end.
  */
@@ -34,7 +33,6 @@ import {
   providerCacheKeyFor,
   readContextWindow,
 } from "../context-window.js";
-import { IdleCompaction } from "../idle-compaction.js";
 import type { UnservedMcpServer } from "../mcp-servers.js";
 import { PromptSuggestions, type PromptSuggestionForms } from "../prompt-suggestions.js";
 import {
@@ -68,12 +66,8 @@ export interface ReportsHost {
   readonly promptSuggestions: PromptSuggestionForms;
   /** Sends v1-shaped updates of the session, in the order of the calls. */
   emit(notifications: AcpSessionNotification[]): void;
-  /**
-   * Whether the session is busy: for the idle compaction, and for a predicted
-   * prompt that arrives meanwhile. `compact` is the idle compaction's `/compact`.
-   */
+  /** Whether the session is busy, for a predicted prompt that arrives meanwhile. */
   isBusy(): boolean;
-  compact(): Promise<void>;
   /** The session as titles read it, the same object each time; undefined until it starts and once it ends. */
   titledSession(): TitledSession | undefined;
 }
@@ -81,10 +75,7 @@ export interface ReportsHost {
 /** What the session's query was started with (see {@link SessionReports.configure}). */
 export interface ReportsSetup {
   /** The session's live Claude Code settings, disposed with the reports. */
-  settings: Pick<
-    SettingsManager,
-    "getCompactionSettings" | "getShowClearContextOnPlanAccept" | "dispose"
-  >;
+  settings: Pick<SettingsManager, "getShowClearContextOnPlanAccept" | "dispose">;
   /** The client's `settings` option, which the query got as `--settings`. */
   configuredSettings: Settings | undefined;
   /** The query's environment. */
@@ -113,7 +104,6 @@ export interface ReportsSetup {
 export class SessionReports {
   private readonly titles: SessionTitles;
   private readonly compaction: ContextCompactionLifecycle;
-  private idleCompaction: IdleCompaction | undefined;
   private settings: ReportsSetup["settings"] | undefined;
   private configuredSettings: Settings | undefined;
   private clientMcpServers = new Set<string>();
@@ -180,17 +170,6 @@ export class SessionReports {
     // From the same env the query got.
     this.providerCacheKey = providerCacheKeyFor(setup.env);
     this.seedContextWindow(setup.model.id, setup.model.info);
-    this.idleCompaction = new IdleCompaction(
-      {
-        isBusy: () => this.host.isBusy(),
-        contextTokens: () => this.contextUsed,
-        settings: () => setup.settings.getCompactionSettings(setup.configuredSettings),
-        compact: () => this.host.compact(),
-        // The logger has no debug level.
-        log: (message) => this.host.logger.log(message),
-      },
-      { env: setup.env },
-    );
   }
 
   /**
@@ -264,11 +243,9 @@ export class SessionReports {
   }
 
   /**
-   * Claude Code's session state went `idle`: the idle compaction may arm, and
-   * the title may have landed (see {@link SessionTitles.onTurnEnd}).
+   * Claude Code's session state went `idle`: its title may have landed.
    */
   idle(): void {
-    this.idleCompaction?.onIdle();
     const session = this.host.titledSession();
     if (session) {
       this.titles.onTurnEnd(session).catch((error) => {
@@ -280,10 +257,9 @@ export class SessionReports {
   // --- Titles ----------------------------------------------------------------
 
   /**
-   * A client prompt drops the armed idle compaction and spends the prediction.
+   * A client prompt spends the prediction.
    */
   promptSent(): void {
-    this.idleCompaction?.disarm("prompt");
     // The prediction is spent: the user sent it or something else. A turn
     // that predicts nothing (plan mode, an API error, the usage limit) then
     // leaves no stale prediction in the composer.
@@ -311,27 +287,15 @@ export class SessionReports {
     }
   }
 
-  /** Drops the armed idle compaction: a prompt or a cancel came. */
-  disarmIdleCompaction(reason: string): void {
-    this.idleCompaction?.disarm(reason);
-  }
-
-  /**
-   * The session's model is `id` now: the idle compaction's request describes
-   * the old one, and the context window is seeded for the new one, as on v1
-   * (`applyConfigOptionValue`). Nothing changes for the same model.
-   */
   modelChanged(id: string, info: ModelInfo | undefined): void {
     if (id === this.modelId) return;
-    this.idleCompaction?.disarm("model change");
     this.seedContextWindow(id, info);
   }
 
   /**
    * A `conversation_reset`: Claude Code mounted a fresh transcript. A
    * compaction still open ends `cancelled`, the title is evaluated again at
-   * the next idle, and the idle compaction's request and TTL describe the
-   * dropped conversation.
+   * the next idle.
    */
   conversationReset(): void {
     void this.compaction.reset();
@@ -340,7 +304,6 @@ export class SessionReports {
     this.lastTotal = null;
     this.contextUsed = 0;
     this.titles.reset();
-    this.idleCompaction?.reset();
     // The prediction came from the transcript that the reset dropped.
     this.sendSuggestions(this.suggestions?.clear());
   }
@@ -369,7 +332,6 @@ export class SessionReports {
 
   dispose(): void {
     this.disposed = true;
-    this.idleCompaction?.dispose();
     this.settings?.dispose();
   }
 
@@ -398,7 +360,6 @@ export class SessionReports {
       const model = event.message.model;
       if (model && model !== "<synthetic>") {
         this.lastModel = model;
-        this.idleCompaction?.noteRequest(event.message.usage, event.message.id || undefined);
       }
     } else if (event.type === "message_delta") {
       const usage = event.usage;
@@ -431,7 +392,6 @@ export class SessionReports {
     this.lastUsage = snapshotFromUsage(message.message.usage);
     this.lastTotal = totalTokens(this.lastUsage);
     this.contextUsed = this.lastTotal;
-    this.idleCompaction?.noteRequest(message.message.usage, message.message.id || undefined);
     if (message.message.model) this.lastModel = message.message.model;
   }
 
@@ -479,7 +439,6 @@ export class SessionReports {
         this.sendSuggestions(this.suggestions?.suggested(message.suggestion, this.host.isBusy()));
         return true;
       case "rate_limit_event":
-        this.idleCompaction?.noteRateLimit(message.rate_limit_info);
         // Sent before the turn's first usage: it goes out with that usage.
         if (this.lastTotal === null) {
           this.pendingRateLimit = message.rate_limit_info;
@@ -508,7 +467,6 @@ export class SessionReports {
         } else if (message.compact_result === "success") {
           void this.compaction.finish(message.uuid, "completed");
         } else if (message.compact_result === "failed") {
-          this.idleCompaction?.noteCompactionFailed(message.compact_error);
           void this.compaction.finish(message.uuid, "failed", {
             ...(message.compact_error ? { error: message.compact_error } : {}),
           });
@@ -519,11 +477,7 @@ export class SessionReports {
         void this.compaction.finish(
           message.uuid,
           "completed",
-          metadata
-            ? contextCompactionMetadataFromBoundary(metadata, {
-                idleCompaction: this.idleCompaction?.isCompacting,
-              })
-            : {},
+          metadata ? contextCompactionMetadataFromBoundary(metadata) : {},
           true,
         );
         // The boundary carries the context that the compaction kept. The
