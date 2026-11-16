@@ -33,9 +33,16 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run test:run
-      - run: bash script/build-standalone-release.sh "$RELEASE_VERSION" dist/standalone linux-x64
+      - run: bash script/build-standalone-release.sh "$RELEASE_VERSION" dist/standalone linux-x64 > build.log 2>&1
         env:
           RELEASE_VERSION: ${{ inputs.version }}
+
+      - name: Report build failure
+        if: failure()
+        run: |
+          tail -n 8 build.log | while IFS= read -r line; do
+            printf '::error::%s\n' "$line"
+          done
 
       - name: Write checksums
         run: |
