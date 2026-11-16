@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -33,14 +33,14 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run test:run
-      - run: bash script/build-standalone-release.sh "$RELEASE_VERSION" dist/standalone
+      - run: bash script/build-standalone-release.sh "$RELEASE_VERSION" dist/standalone linux-x64
         env:
           RELEASE_VERSION: ${{ inputs.version }}
 
       - name: Write checksums
         run: |
           cd dist/standalone
-          shasum -a 256 *.tar.gz > SHA256SUMS
+          sha256sum *.tar.gz > SHA256SUMS
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
