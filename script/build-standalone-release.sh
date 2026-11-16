@@ -52,5 +52,5 @@ for item in "${platforms[@]}"; do
         ;;
     esac
   fi
-  COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root -C "$work" -czf "$out_dir/claude-agent-acp-${version}-${platform}.tar.gz" "$adapter_binary" "$sdk_binary"
+  COPYFILE_DISABLE=1 tar --format ustar -C "$work" -czf "$out_dir/claude-agent-acp-${version}-${platform}.tar.gz" "$adapter_binary" "$sdk_binary"
 done
