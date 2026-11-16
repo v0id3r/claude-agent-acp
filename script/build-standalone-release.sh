@@ -3,6 +3,7 @@ set -euo pipefail
 
 version="${1:?version required}"
 out_dir="${2:?output directory required}"
+wanted_platform="${3:-all}"
 
 if [[ "$version" != "$(node -p 'require("./package.json").version')" ]]; then
   echo "Version must match package.json" >&2
@@ -27,6 +28,7 @@ tmp="$(mktemp -d "$out_dir/.build-XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 
 for item in "${platforms[@]}"; do
+  [[ "$wanted_platform" == all || "$item" == "$wanted_platform|"* ]] || continue
   IFS="|" read -r platform bun_target sdk_package adapter_binary sdk_binary <<< "$item"
   work="$tmp/$platform"
   mkdir -p "$work"
