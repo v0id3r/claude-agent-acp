@@ -3,8 +3,9 @@
 Jaz publishes standalone adapter archives through
 [Release Standalone](../.github/workflows/release-standalone.yml).
 The workflow is dispatched manually with the fork version from `package.json`.
-It runs the adapter tests, bundles the pinned Claude runtime, and publishes
-platform archives and SHA256SUMS under `v<version>`.
+It runs the adapter tests, bundles the pinned Claude runtime, and uploads
+platform archives and SHA256SUMS as workflow artifacts. When `publish` is
+checked, it also publishes them under `v<version>`.
 Builds run on macOS so the compiled adapters receive a valid ad-hoc signature.
 Packaging verifies both macOS executables and runs the native architecture's
 version commands before publishing.
