@@ -6,7 +6,11 @@ on:
       version:
         description: "Standalone release version, without leading v"
         required: true
-        default: "0.107.0-jaz.1"
+        default: "0.107.2-jaz.1"
+      publish:
+        description: "Publish a GitHub release after the build"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -38,7 +42,17 @@ jobs:
           cd dist/standalone
           shasum -a 256 *.tar.gz > SHA256SUMS
 
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-agent-acp-${{ inputs.version }}
+          path: |
+            dist/standalone/*.tar.gz
+            dist/standalone/SHA256SUMS
+          if-no-files-found: error
+
       - name: Publish release
+        if: inputs.publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
@@ -47,7 +61,7 @@ jobs:
           prerelease: false
           generate_release_notes: false
           body: |
-            Claude ACP 0.107.0 with Claude Agent SDK 0.3.325 and Claude Code 2.1.325.
+            Claude ACP 0.107.2 with Claude Agent SDK 0.3.325 and Claude Code 2.1.325.
 
             Preserves Jaz MCP refresh, native effort defaults, provider-reported context windows, and subagent/work-state reporting.
 

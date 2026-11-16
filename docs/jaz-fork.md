@@ -1,7 +1,7 @@
 # Jaz fork
 
 This fork is upstream [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)
-plus the patches below. The current build is `0.107.0-jaz.1`, with Claude Agent SDK `0.3.325` and Claude Code `2.1.325`. Keep each patch until upstream covers its contract.
+plus the patches below. The current build is `0.107.2-jaz.1`, with Claude Agent SDK `0.3.325` and Claude Code `2.1.325`. Keep each patch until upstream covers its contract.
 
 | Patch                     | Where                                                                            | Why it stays                                                                                                                                                                                                                             |
 | ------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
