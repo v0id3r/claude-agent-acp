@@ -631,6 +631,12 @@ const TURN_NO_RESULT_MESSAGE =
  *  compaction, asks for a title from its prompt, nor clears the published prompt suggestion. */
 type TurnOrigin = "client" | "idleCompaction";
 
+/** A `waitForCompletion` steer waiting on the turn it joined. */
+type SteerWaiter = {
+  resolve: (outcome: TurnOutcome) => void;
+  reject: (error: unknown) => void;
+};
+
 /** One in-flight turn, started by `startTurn()`. A persistent per-session
  *  consumer (see `runConsumer`) drains the SDK query stream for the whole
  *  session and settles each Turn when that turn's outcome is known, so
@@ -837,6 +843,11 @@ type Turn = {
   /** What a steered turn settles with once its steered work has run: the outcome
    *  of its latest result, so its usage covers every cycle the turn ran. */
   steeredSettle?: TurnOutcome;
+  /** Waiters of this turn's steers that asked for `waitForCompletion`. Fed
+   *  through the turn's own resolve/reject wrappers (see startTurn), so a
+   *  waiter answers with exactly the outcome the turn's prompt response
+   *  carries. */
+  steerWaiters?: Set<SteerWaiter>;
   carriedUsage?: AccumulatedUsage;
   /** `carriedUsage`'s per-model counterpart, so a turn that survives a
    *  clear-context restart keeps the `_meta.quota` rows it earned pre-restart. */
@@ -1487,6 +1498,16 @@ function isSteeredSettleReady(
   );
 }
 
+/** Answer every `waitForCompletion` steer waiter of `turn`: the terminal
+ *  outcome on settlement, the error on failure. Drained through the turn's
+ *  own resolve/reject wrappers so both lanes share one terminal signal. */
+function settleSteerWaiters(turn: Turn, settle: (waiter: SteerWaiter) => void): void {
+  if (!turn.steerWaiters) return;
+  const waiters = [...turn.steerWaiters];
+  turn.steerWaiters.clear();
+  for (const waiter of waiters) settle(waiter);
+}
+
 /** Take a turn out of the steer lane so its settlement follows the ordinary
  *  result/idle rules again. */
 function leaveSteerLane(turn: Turn): void {
@@ -1987,6 +2008,9 @@ export class ClaudeAcpAgent {
           : {}),
         steering: {
           supported: true,
+          // `_session/steering` answers with the joined turn's terminal
+          // stopReason and `_meta` when the request sets `waitForCompletion`.
+          waitForCompletion: true,
         },
       },
     };
@@ -2679,11 +2703,13 @@ export class ClaudeAcpAgent {
         this.endForeground(params.sessionId, turn, { outcome });
         events.ended(outcome);
         completeTurn();
+        settleSteerWaiters(turn, (waiter) => waiter.resolve(outcome));
       },
       reject: (error) => {
         this.endForeground(params.sessionId, turn, { error });
         events.failed(error);
         completeTurn();
+        settleSteerWaiters(turn, (waiter) => waiter.reject(error));
       },
     };
 
@@ -3105,6 +3131,16 @@ export class ClaudeAcpAgent {
       const subscriptionGuard = this.runClaudeSubscriptionGuard(sessionId, session);
       if (subscriptionGuard) await subscriptionGuard;
 
+      if (params.waitForCompletion) {
+        // Answer with the new turn's own terminal outcome, like the prompt
+        // that runs it; a rejection propagates as this request's error.
+        const outcome = await this.prompt(promptRequest);
+        return {
+          outcome: "startedNewTurn",
+          stopReason: outcome.stopReason,
+          ...(outcome._meta ? { _meta: outcome._meta } : {}),
+        };
+      }
       // Preserve the established default for Hosts that do not opt in. This is
       // intentionally detached for compatibility with the existing contract.
       this.prompt(promptRequest).catch((error) => {
@@ -3126,8 +3162,15 @@ export class ClaudeAcpAgent {
     // Mark before the push and in the same synchronous section as the in-flight
     // check: the interrupt can have the CLI finalizing the aborted cycle by the
     // time the consumer next runs, and an unmarked result would settle the turn
-    // (see Turn.steeredEchoes).
+    // (see Turn.steeredEchoes). A completion waiter registers in the same
+    // section, so a turn unsettled at the check cannot settle before the
+    // waiter exists.
     session.idleCompaction?.disarm("steer");
+    const completion = params.waitForCompletion
+      ? new Promise<TurnOutcome>((resolve, reject) => {
+          (turnInFlight.steerWaiters ??= new Set()).add({ resolve, reject });
+        })
+      : undefined;
     (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
     (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
     // A turn already held for background subagents has a recorded outcome the
@@ -3143,7 +3186,18 @@ export class ClaudeAcpAgent {
     session.input.push(userMessage);
     const firstText = params.prompt[0]?.type === "text" ? params.prompt[0].text : "";
     await this.publishGoalFromPrompt(sessionId, firstText, steeredUuid);
-    return { outcome: "injected" };
+    if (!completion) {
+      return { outcome: "injected" };
+    }
+    // Answer once the turn this steer joined settles; its resolve wrapper
+    // feeds this waiter the same terminal outcome the turn's prompt response
+    // carries (stopReason plus the turn's `_meta`, e.g. its usage quota).
+    const outcome = await completion;
+    return {
+      outcome: "injected",
+      stopReason: outcome.stopReason,
+      ...(outcome._meta ? { _meta: outcome._meta } : {}),
+    };
   }
 
   async stopAsyncTask(params: AsyncTaskStopRequest): Promise<AsyncTaskStopResponse> {
