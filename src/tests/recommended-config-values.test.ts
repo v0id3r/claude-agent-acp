@@ -417,13 +417,19 @@ describe("model reasoning efforts", () => {
     expect(entry(options, "opus")?._meta).toEqual(effortsMeta(["low", "medium", "high"], "medium"));
   });
 
-  it("matches the effort option's recommendation for the current model", () => {
+  it("names each model's recommendation while the effort option recommends nothing", () => {
+    // The fork leaves the effort choice to the client and Claude Code: the
+    // effort option carries no recommended value, only the model entries name
+    // one for AIR.
     const infos = MODEL_INFOS.map((model) =>
       model.value === "opus"
         ? { ...model, supportedEffortLevels: ["high", "max"] as ModelInfo["supportedEffortLevels"] }
         : model,
     );
-    for (const currentModelId of ["opus", "sonnet"]) {
+    for (const [currentModelId, recommended] of [
+      ["opus", "high"],
+      ["sonnet", "medium"],
+    ] as const) {
       const options = buildConfigOptions(
         MODES,
         { ...MODELS, currentModelId },
@@ -434,12 +440,16 @@ describe("model reasoning efforts", () => {
         undefined,
         AIR_RECOMMENDED,
       );
-      const recommended = (
-        entry(options, currentModelId)?._meta as {
-          jetbrains: { air: { reasoningEfforts: { recommended: string } } };
-        }
-      ).jetbrains.air.reasoningEfforts.recommended;
-      expect(selectOption(options, "effort")._meta).toEqual(recommendedMeta(recommended));
+      expect(entry(options, currentModelId)?._meta).toEqual(
+        expect.objectContaining({
+          jetbrains: expect.objectContaining({
+            air: expect.objectContaining({
+              reasoningEfforts: expect.objectContaining({ recommended }),
+            }),
+          }),
+        }),
+      );
+      expect(selectOption(options, "effort")._meta).toBeUndefined();
     }
   });
 
