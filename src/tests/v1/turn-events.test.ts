@@ -274,6 +274,7 @@ describe("turn events", () => {
     agent = new ClaudeAcpAgent(
       { sessionUpdate: send, extNotification: async () => {} } as unknown as AcpClient,
       undefined,
+      undefined,
       {
         foreground: (sessionId) => jazWorkState(sessionId, send, () => agent.sessions[sessionId]),
       },
