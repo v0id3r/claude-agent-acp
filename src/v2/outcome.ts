@@ -90,6 +90,19 @@ export function idleOutcome(
     ended.loginRequired ||
     ((result.subtype === "success" || result.subtype === "error_during_execution") &&
       providerFailureCategory(kind) === "auth_required");
+   if (authFailure) {
+     // Claude Code's `/login` instruction is for its terminal, so that text
+     // is left out. Any other says why the login failed, e.g. "Failed to
+     // authenticate: this login reached its time limit and cannot be
+     // renewed.". No failure record: the `authRequired` code starts the
+     // client's login flow.
+     return failed(
+       RequestError.authRequired(undefined, ended.loginRequired ? undefined : ended.error),
+     );
+   }
+   return failed(
+     RequestError.internalError(turnErrorData(kind, report?.rateLimit), ended.error),
+   );
   return failed(
     authFailure
       ? // Claude Code's `/login` instruction is for its terminal, so that text
