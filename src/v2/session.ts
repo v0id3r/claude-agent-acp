@@ -53,10 +53,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { AUTONOMOUS_RESULT_ORIGINS } from "../result-end.js";
-import {
-  AIR_FAILURE_POLICY,
-  type ClaudeFailureKind,
-} from "../session-failure-extension.js";
+import { AIR_FAILURE_POLICY, type ClaudeFailureKind } from "../session-failure-extension.js";
 import { promptToClaude } from "../prompt-to-claude.js";
 import type { Logger } from "../logger.js";
 import type { McpCommand } from "../mcp-command.js";

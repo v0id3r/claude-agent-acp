@@ -103,13 +103,14 @@ export function idleOutcome(
     // authenticate: this login reached its time limit and cannot be
     // renewed.". No failure record: the `authRequired` code starts the
     // client's login flow.
-    return failed(RequestError.authRequired(undefined, ended.loginRequired ? undefined : ended.error));
+    return failed(
+      RequestError.authRequired(undefined, ended.loginRequired ? undefined : ended.error),
+    );
   }
   const failureKind =
     (result.subtype !== "success" && result.subtype !== "error_during_execution"
       ? LIMIT_FAILURE_KIND[result.subtype]
-      : undefined) ??
-    (report?.usageLimit ? "quota_exhausted" : providerFailureCategory(kind));
+      : undefined) ?? (report?.usageLimit ? "quota_exhausted" : providerFailureCategory(kind));
   return failed(
     RequestError.internalError(turnErrorData(kind, report?.rateLimit), ended.error),
     failureMeta?.({ kind: failureKind, title: ended.error }),
