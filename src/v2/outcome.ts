@@ -18,7 +18,13 @@ import type {
 import { AUTONOMOUS_RESULT_ORIGINS } from "../result-end.js";
 import { isSyntheticLoginMessage } from "../message-filters.js";
 import { resultEnd, turnErrorData } from "../result-end.js";
-import { assistantMessageText, providerFailureCategory } from "../session-failure-extension.js";
+import {
+  assistantMessageText,
+  isSyntheticUsageLimitMessage,
+  LIMIT_FAILURE_KIND,
+  providerFailureCategory,
+  type ClaudeFailureKind,
+} from "../session-failure-extension.js";
 import {
   getMatchingModelUsage,
   modelUsageIncrement,
@@ -70,6 +76,7 @@ export function idleOutcome(
   cancelled: boolean,
   report?: TurnReport,
   prompted = false,
+  failureMeta?: (failure: { kind: ClaudeFailureKind; title: string }) => Record<string, unknown>,
 ): IdleOutcome {
   const spent = end
     ? { usage: end.usage, _meta: end._meta }
@@ -90,18 +97,26 @@ export function idleOutcome(
     ended.loginRequired ||
     ((result.subtype === "success" || result.subtype === "error_during_execution") &&
       providerFailureCategory(kind) === "auth_required");
+  if (authFailure) {
+    // Claude Code's `/login` instruction is for its terminal, so that text
+    // is left out. Any other says why the login failed, e.g. "Failed to
+    // authenticate: this login reached its time limit and cannot be
+    // renewed.". No failure record: the `authRequired` code starts the
+    // client's login flow.
+    return failed(RequestError.authRequired(undefined, ended.loginRequired ? undefined : ended.error));
+  }
+  const failureKind =
+    (result.subtype !== "success" && result.subtype !== "error_during_execution"
+      ? LIMIT_FAILURE_KIND[result.subtype]
+      : undefined) ??
+    (report?.usageLimit ? "quota_exhausted" : providerFailureCategory(kind));
   return failed(
-    authFailure
-      ? // Claude Code's `/login` instruction is for its terminal, so that text
-        // is left out. Any other says why the login failed, e.g. "Failed to
-        // authenticate: this login reached its time limit and cannot be
-        // renewed."
-        RequestError.authRequired(undefined, ended.loginRequired ? undefined : ended.error)
-      : RequestError.internalError(turnErrorData(kind, report?.rateLimit), ended.error),
+    RequestError.internalError(turnErrorData(kind, report?.rateLimit), ended.error),
+    failureMeta?.({ kind: failureKind, title: ended.error }),
   );
 }
 
-function failed(error: RequestError): IdleOutcome {
+function failed(error: RequestError, meta?: Record<string, unknown>): IdleOutcome {
   return {
     stopReason: "error",
     error: {
@@ -109,6 +124,7 @@ function failed(error: RequestError): IdleOutcome {
       message: error.message,
       ...(error.data !== undefined ? { data: error.data } : {}),
     },
+    ...(meta ? { _meta: meta } : {}),
   };
 }
 
@@ -123,6 +139,8 @@ export class TurnReport {
   rateLimit: SDKRateLimitInfo | undefined;
   /** Claude Code showed its sign-in message ("Not logged in · Please run /login"). */
   loginRequired = false;
+  /** The turn hit a usage or spend limit (Claude Code's synthetic limit message). */
+  usageLimit = false;
   /** The explanation of the turn's refusal. */
   refusalExplanation: string | undefined;
   /**
@@ -145,6 +163,7 @@ export class TurnReport {
    */
   assistant(message: SDKAssistantMessage): boolean {
     if (message.error) this.errorKind = message.error;
+    if (isSyntheticUsageLimitMessage(message.message)) this.usageLimit = true;
     if (message.message.stop_reason === "refusal") {
       this.refusalExplanation =
         message.message.stop_details?.explanation ?? this.refusalExplanation;
@@ -186,6 +205,7 @@ export class TurnReport {
     this.errorKind = undefined;
     this.rateLimit = undefined;
     this.loginRequired = false;
+    this.usageLimit = false;
     this.refusalExplanation = undefined;
     this.apiError = undefined;
   }

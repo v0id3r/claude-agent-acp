@@ -272,6 +272,7 @@ import {
   createSessionFailureState,
   isSyntheticUsageLimitMessage,
   type PublishedSessionFailure,
+  LIMIT_FAILURE_KIND,
   providerFailureCategory,
   SessionFailureController,
   type SessionFailureState,
@@ -1568,12 +1569,6 @@ function stripSubagentTextAndThinking(content: unknown): unknown {
 const SESSION_ENDED_MESSAGE = "The Claude Agent session has ended. Please start a new session.";
 
 /** The session failure of an error result at one of Claude Code's limits. */
-const LIMIT_FAILURE_CATEGORY = {
-  error_max_budget_usd: "budget_exhausted",
-  error_max_turns: "context_exhausted",
-  error_max_structured_output_retries: "provider_error",
-} as const satisfies Record<string, ClaudeFailureKind>;
-
 function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const cleanup = () => signal.removeEventListener("abort", onAbort);
@@ -6423,7 +6418,7 @@ export class ClaudeAcpAgent {
                 case "error_max_structured_output_retries":
                   if ("error" in ended) {
                     await failActiveWithSessionFailure(
-                      LIMIT_FAILURE_CATEGORY[message.subtype],
+                      LIMIT_FAILURE_KIND[message.subtype],
                       internalErrorForClient(
                         turnErrorData(lastAssistantError, turnRateLimit),
                         ended.error,

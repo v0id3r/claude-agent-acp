@@ -54,6 +54,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { AUTONOMOUS_RESULT_ORIGINS, isAbortedResult } from "../result-end.js";
+import { AIR_FAILURE_POLICY, type ClaudeFailureKind } from "../session-failure-extension.js";
 import { promptToClaude } from "../prompt-to-claude.js";
 import type { Logger } from "../logger.js";
 import type { McpCommand } from "../mcp-command.js";
@@ -1563,6 +1564,7 @@ export class V2Session implements RequestTarget {
             this.cancelledWork,
             this.turnReport,
             this.turnCommand !== undefined,
+            (failure) => this.turnFailureMeta(failure),
           ),
         };
     }
@@ -1570,6 +1572,38 @@ export class V2Session implements RequestTarget {
 
   private send(update: v2.SessionUpdate): void {
     this.sendNotification({ sessionId: this.sessionId, update });
+  }
+
+  private readonly failureEpoch = randomUUID();
+  private failureIncidents = 0;
+
+  /**
+   * The `_meta.jaz.sessionFailure` of a failed turn's idle: the AIR session
+   * failure record (docs/air-extensions.md) under the `jaz` key, with the
+   * policy's recovery actions (`retry` on an overload) that the bare v2 error
+   * cannot carry. Auth failures get none: their `authRequired` error code
+   * starts the client's login flow.
+   */
+  private turnFailureMeta({
+    kind,
+    title,
+  }: {
+    kind: ClaudeFailureKind;
+    title: string;
+  }): Record<string, unknown> {
+    const policy = AIR_FAILURE_POLICY[kind];
+    return {
+      jaz: {
+        sessionFailure: {
+          id: `${this.sessionId}:session-error:${this.failureEpoch}:${++this.failureIncidents}`,
+          revision: 1,
+          category: policy.category,
+          severity: "error",
+          title,
+          actions: policy.actions,
+        },
+      },
+    };
   }
 
   /** Sends an update of the session or of a child, with its `background` list. */

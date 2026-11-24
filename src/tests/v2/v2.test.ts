@@ -3570,11 +3570,14 @@ describe("ACP v2 core", () => {
     expect(
       client.sessionUpdates.filter((update) => update.sessionUpdate === "agent_message_chunk"),
     ).toEqual([]);
-    expect(client.sessionUpdates.at(-1)).toMatchObject({
+    const idle = client.sessionUpdates.at(-1);
+    expect(idle).toMatchObject({
       state: "idle",
       stopReason: "error",
       error: { code: -32000, message: "Authentication required" },
     });
+    // Auth failures stay untyped: the authRequired code starts the login flow.
+    expect(idle).not.toHaveProperty("_meta.jaz");
   });
 
   it.each([
@@ -3627,6 +3630,45 @@ describe("ACP v2 core", () => {
     expect(client.sessionUpdates.at(-1)).toMatchObject({
       stopReason: "error",
       error: { data: { errorKind: "rate_limit", rateLimit } },
+      _meta: {
+        jaz: {
+          sessionFailure: {
+            id: expect.stringMatching(/:session-error:.+:1$/),
+            revision: 1,
+            category: "limit",
+            severity: "error",
+            title: "You've hit your 5-hour limit",
+            actions: ["retry"],
+          },
+        },
+      },
+    });
+  });
+
+  it("marks an overloaded turn's idle with a retryable session failure", async () => {
+    const client = v2Client();
+    await client.connect(async (agent) => {
+      const { claude } = await openSession(agent);
+      claude.send(cycleStart());
+      claude.send({ ...assistant("msg_overloaded", []), error: "overloaded" });
+      claude.send(result({ is_error: true, result: "API Error: 529 Overloaded" }));
+      await vi.waitFor(() => expect(client.states()).toEqual(["running", "idle"]));
+    });
+
+    expect(client.sessionUpdates.at(-1)).toMatchObject({
+      state: "idle",
+      stopReason: "error",
+      _meta: {
+        jaz: {
+          sessionFailure: {
+            revision: 1,
+            category: "service",
+            severity: "error",
+            title: "API Error: 529 Overloaded",
+            actions: ["retry"],
+          },
+        },
+      },
     });
   });
 

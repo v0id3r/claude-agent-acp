@@ -5092,6 +5092,18 @@ describe("ACP v2 prompts", () => {
       stopReason: "error",
       error: expect.objectContaining({ code: v1Error.code, message: v1Error.message }),
       background: [],
+      _meta: {
+        jaz: {
+          sessionFailure: {
+            id: expect.stringMatching(/:session-error:.+:1$/),
+            revision: 1,
+            category: "service",
+            severity: "error",
+            title: "API Error: 529 Overloaded",
+            actions: ["retry"],
+          },
+        },
+      },
     });
   });
 
