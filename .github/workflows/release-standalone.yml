@@ -6,7 +6,7 @@ on:
       version:
         description: "Standalone release version, without leading v"
         required: true
-        default: "0.107.2-jaz.1"
+        default: "0.111.0-jaz.1"
       publish:
         description: "Publish a GitHub release after the build"
         type: boolean
@@ -68,7 +68,7 @@ jobs:
           prerelease: false
           generate_release_notes: false
           body: |
-            Claude ACP 0.107.2 with Claude Agent SDK 0.3.325 and Claude Code 2.1.325.
+            Claude ACP 0.111.0 with Claude Agent SDK 0.3.331 and Claude Code 2.1.331.
 
             Preserves Jaz MCP refresh, native effort defaults, provider-reported context windows, and subagent/work-state reporting.
 
