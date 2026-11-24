@@ -87,7 +87,14 @@ export function createSessionFailureState(): SessionFailureState {
   };
 }
 
-const AIR_FAILURE_POLICY: Record<
+/** The failure kind of a result subtype that ends the turn on a limit. */
+export const LIMIT_FAILURE_KIND = {
+  error_max_budget_usd: "budget_exhausted",
+  error_max_turns: "context_exhausted",
+  error_max_structured_output_retries: "provider_error",
+} as const satisfies Record<string, ClaudeFailureKind>;
+
+export const AIR_FAILURE_POLICY: Record<
   ClaudeFailureKind,
   {
     category: AirSessionFailureCategory;
