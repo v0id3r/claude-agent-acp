@@ -317,6 +317,8 @@ export class SessionTasks {
       output: SessionOutput;
       tail?: BackgroundOutputTail;
       ending?: boolean;
+      /** The status of a terminal `task_updated` whose exit waits for the task_notification. */
+      endedStatus?: "completed" | "failed" | "stopped";
       /** Whether Claude Code's live background task set held its task. */
       leveled?: boolean;
     }
@@ -1002,7 +1004,7 @@ export class SessionTasks {
     this.releaseHeldEnds();
     for (const [taskId, terminal] of this.terminals) {
       terminal.tail?.stop();
-      if (error) this.exitTerminal(taskId);
+      if (error) this.exitTerminal(taskId, { code: null });
     }
     if (!error) return;
     for (const [taskId] of this.toolCalls) this.endToolCall(taskId, "stopped");
@@ -1204,7 +1206,7 @@ export class SessionTasks {
     ) {
       return;
     }
-    this.taskEnded(message.task_id, message.status);
+    this.taskEnded(message.task_id, message.status, undefined, { summary: message.summary });
   }
 
   /**
@@ -1237,12 +1239,17 @@ export class SessionTasks {
   /**
    * The task `taskId` ended. Claude Code can report one end twice (a
    * terminal `task_updated` and a `task_notification`), so a second is a
-   * no-op, unless it gives the error text of a failure that the first lacked.
+   * no-op, unless it gives the error text of a failure that the first lacked
+   * or the summary that the first lacked (see the terminal below). `end`
+   * carries what only a `task_notification` has: the summary, which names a
+   * command's exit code, and whether the report is the live task set's
+   * backstop, which says nothing about the end.
    */
   private taskEnded(
     taskId: string,
     status: "completed" | "failed" | "stopped",
     error?: string,
+    end: { summary?: string; backstop?: boolean } = {},
   ): void {
     const child = this.children.get(taskId);
     const foreground = this.agents.get(taskId)?.background === false;
@@ -1291,13 +1298,26 @@ export class SessionTasks {
     this.started.delete(taskId);
     const terminal = this.terminals.get(taskId);
     if (terminal && !terminal.ending) {
-      terminal.ending = true;
-      // The rest of the output goes out before the exit, and the list drops
-      // the terminal only after its exit.
-      void (terminal.tail?.finish() ?? Promise.resolve()).then(() => {
-        this.exitTerminal(taskId);
-        this.publish();
-      });
+      if (end.summary === undefined && !end.backstop) {
+        // A terminal `task_updated` comes before the `task_notification`
+        // that names the command's exit code: hold the exit for it. The live
+        // task set dropping the task is the backstop when it never comes.
+        terminal.endedStatus ??= status;
+      } else {
+        terminal.ending = true;
+        const exit = terminalExit(
+          end.backstop ? undefined : end.summary,
+          end.backstop && terminal.endedStatus === undefined
+            ? undefined
+            : (terminal.endedStatus ?? status),
+        );
+        // The rest of the output goes out before the exit, and the list drops
+        // the terminal only after its exit.
+        void (terminal.tail?.finish() ?? Promise.resolve()).then(() => {
+          this.exitTerminal(taskId, exit);
+          this.publish();
+        });
+      }
     }
     if (this.toolCalls.has(taskId)) this.endToolCall(taskId, status);
     this.publish();
@@ -1332,7 +1352,8 @@ export class SessionTasks {
       if (this.level.get(taskId)?.ambient === false) terminal.leveled = true;
     }
     for (const taskId of [...this.terminals.keys(), ...this.toolCalls.keys()]) {
-      if (!this.level.has(taskId)) this.taskEnded(taskId, "completed");
+      if (!this.level.has(taskId))
+        this.taskEnded(taskId, "completed", undefined, { backstop: true });
     }
     this.publish();
   }
@@ -2345,7 +2366,7 @@ export class SessionTasks {
     );
   }
 
-  private exitTerminal(taskId: string): void {
+  private exitTerminal(taskId: string, exit: TerminalExit): void {
     const terminal = this.terminals.get(taskId);
     if (!terminal) return;
     this.terminals.delete(taskId);
@@ -2356,7 +2377,12 @@ export class SessionTasks {
           sessionUpdate: "tool_call_update",
           toolCallId: terminal.toolCallId,
           _meta: {
-            terminal_exit: { terminal_id: terminal.toolCallId, exit_code: null, signal: null },
+            terminal_exit: {
+              terminal_id: terminal.toolCallId,
+              exit_code: exit.code,
+              signal: null,
+              ...(exit.reason !== undefined ? { reason: exit.reason } : {}),
+            },
           },
         },
       },
@@ -2376,6 +2402,29 @@ export class SessionTasks {
   private sendAll(notifications: v2.UpdateSessionNotification[]): void {
     for (const notification of notifications) this.host.send(notification);
   }
+}
+
+/** How a background command's terminal ends: the exit code when it is known, and the reported status when it is not. */
+interface TerminalExit {
+  code: number | null;
+  reason?: string;
+}
+
+/**
+ * The exit of a background command's terminal. Claude Code reports no
+ * structured exit code for a background command: its task_notification's
+ * summary names it (`… completed (exit code 0)`, `… failed with exit code
+ * 1`), so that is where the code comes from. Without a code, the status
+ * Claude Code reported is the exit's reason; a report that says nothing (the
+ * live task set's backstop, a dead query) leaves both unknown.
+ */
+function terminalExit(
+  summary: string | undefined,
+  status: "completed" | "failed" | "stopped" | undefined,
+): TerminalExit {
+  const match = summary === undefined ? null : /exit code (-?\d+)/.exec(summary);
+  const code = match ? Number(match[1]) : null;
+  return { code, ...(code === null && status !== undefined ? { reason: status } : {}) };
 }
 
 /**

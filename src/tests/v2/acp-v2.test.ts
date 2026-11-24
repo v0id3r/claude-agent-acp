@@ -9776,16 +9776,66 @@ describe("ACP v2 terminal of a command in the background", () => {
     const trace = terminalTrace(client);
     expect(trace.filter((entry) => entry === "exit")).toHaveLength(1);
     expect(trace.indexOf("exit")).toBeGreaterThan(trace.indexOf("idle end_turn"));
-    // Claude Code reports no exit code for a command in the background.
+    // The exit waits for the task_notification, which names the exit code.
     expect(
       client.updates("terminal_update").find((update) => update.exitStatus)?.exitStatus,
-    ).toEqual({});
+    ).toEqual({ exitCode: 3 });
     expect(
       client
         .updates("tool_call_update")
         .filter((update) => update.toolCallId === "toolu_bg" && update.status)
         .map((update) => update.status),
     ).toEqual(["pending", "completed"]);
+  });
+
+  it("ends the terminal with the exit code of a command that completed", async () => {
+    scriptTurns(async function* (options) {
+      yield taskStarted(options);
+      yield bashUse(options);
+      yield backgrounded(options);
+      yield result(options);
+      yield idleState(options);
+      yield taskEvent(options, "task_updated", { patch: { status: "completed" } });
+      yield taskEvent(options, "task_notification", {
+        tool_use_id: "toolu_bg",
+        status: "completed",
+        output_file: "/tmp/tasks/bg1.output",
+        summary: 'Background command "make test" completed (exit code 0)',
+      });
+      yield assistantText(options, "The tests passed.", "msg_followup");
+      yield result(options, { origin: { kind: "task-notification" } });
+      yield idleState(options);
+    });
+    const client = await promptUntilIdle(2);
+
+    expect(
+      client.updates("terminal_update").find((update) => update.exitStatus)?.exitStatus,
+    ).toEqual({ exitCode: 0 });
+  });
+
+  it("ends the terminal of a stopped command with the reported reason and no invented code", async () => {
+    scriptTurns(async function* (options) {
+      yield taskStarted(options);
+      yield bashUse(options);
+      yield backgrounded(options);
+      yield result(options);
+      yield idleState(options);
+      yield taskEvent(options, "task_updated", { patch: { status: "killed" } });
+      yield taskEvent(options, "task_notification", {
+        tool_use_id: "toolu_bg",
+        status: "stopped",
+        output_file: "/tmp/tasks/bg1.output",
+        summary: "make test",
+      });
+      yield assistantText(options, "It was stopped.", "msg_followup");
+      yield result(options, { origin: { kind: "task-notification" } });
+      yield idleState(options);
+    });
+    const client = await promptUntilIdle(2);
+
+    expect(
+      client.updates("terminal_update").find((update) => update.exitStatus)?.exitStatus,
+    ).toEqual({ _meta: { claudeCode: { reason: "stopped" } } });
   });
 
   it("ends the terminal at the Bash result when the command's task ended before it", async () => {
@@ -9911,6 +9961,10 @@ describe("ACP v2 terminal of a command in the background", () => {
         "exit, no cancel",
         "idle []",
       ]);
+      // No end was reported: the exit names neither a code nor a reason.
+      expect(
+        client.updates("terminal_update").find((update) => update.exitStatus)?.exitStatus,
+      ).toEqual({});
     });
 
     it("reads the command's output file into its terminal, and the rest before its exit", async () => {

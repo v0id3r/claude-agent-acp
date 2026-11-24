@@ -23,7 +23,13 @@ interface TerminalMeta {
   terminal_info?: { terminal_id: string };
   terminal_output?: { terminal_id: string; data: string };
   terminal_output_delta?: { terminal_id: string; data: string };
-  terminal_exit?: { terminal_id: string; exit_code: number | null; signal: string | null };
+  terminal_exit?: {
+    terminal_id: string;
+    exit_code: number | null;
+    signal: string | null;
+    /** Why the command ended, when no exit code is known (e.g. `stopped`). */
+    reason?: string;
+  };
 }
 
 const TERMINAL_KEYS = [
@@ -87,6 +93,9 @@ export class V2Terminals {
                 exitStatus: {
                   ...(exit.exit_code != null ? { exitCode: exit.exit_code } : {}),
                   ...(exit.signal != null ? { signal: exit.signal } : {}),
+                  ...(exit.reason != null
+                    ? { _meta: { claudeCode: { reason: exit.reason } } }
+                    : {}),
                 },
                 // An exited terminal can no longer be cancelled.
                 ...(running.cancellable ? { capabilities: null } : {}),
