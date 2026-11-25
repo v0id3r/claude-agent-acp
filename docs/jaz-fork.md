@@ -5,7 +5,7 @@ plus the patches below. Keep each patch until upstream covers its contract.
 
 | Patch                     | Where                                                                            | Why it stays                                                                                                                                                                                                    |
 | ------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Context window matching   | `src/session-usage.ts`                                                           | `modelUsage` matches by canonical model form instead of the longest shared prefix, so a prefix cannot borrow another model's window. Default stays 0 until Claude reports it (upstream assumes 1M).            |
+| Context window matching   | `src/session-usage.ts`                                                           | `modelUsage` matches by canonical model form instead of the longest shared prefix, so a prefix cannot borrow another model's window.                                                                             |
 | Context routing env       | `src/context-window.ts`                                                          | `CLAUDE_CODE_DISABLE_1M_CONTEXT` joins the provider-routing env vars, so per-provider caches do not cross 200K/1M lanes.                                                                                          |
 | Reported model resolution | `resolveReportedModel` in `src/session-model.ts`                                 | A model that Claude reports maps to the row with that id or resolved model, then to one that differs only by the context suffix. Upstream's preference matching can pick a sibling row.                         |
 | Terminal exit status      | `src/v2/tasks.ts`, `src/v2/terminal.ts`                                          | A background command's terminal exit carries the exit code parsed from its `task_notification` summary (`… failed with exit code 3`). Without a code the exit is empty, as upstream reports it.                 |
@@ -37,9 +37,7 @@ Upstream tests run unmodified except where a patch above changes the behaviour u
 | Test file | Patch | What changes |
 | --- | --- | --- |
 | `src/tests/model-resolution.test.ts` | reported model resolution | adds the provider-reported-variant case |
-| `src/tests/v1/acp-agent.test.ts` | context window matching | adds the shared-name-prefix window case; size expectations read 0 until the window is reported |
-| `src/tests/v1/session-config-options.test.ts` | context window default 0 | the switched model seeds the unknown window (0), the background read refines it |
-| `src/tests/v1/create-session-options.test.ts` | context window default 0 | session creation seeds 0 until the background read lands |
+| `src/tests/v1/acp-agent.test.ts` | context window matching | adds the shared-name-prefix window case |
 | `src/tests/acp-scenarios/` (compare.ts, harness.ts, snapshots) | patches above | `withoutJazFork` strips the patches' wire differences; snapshots regenerated |
 | `src/tests/v2/acp-v2.test.ts`, `src/tests/v2/v2.test.ts` | terminal exit status | new assertions for the exit code carried from the task notification summary |
 

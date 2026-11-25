@@ -1299,8 +1299,7 @@ describe("session config options", () => {
       // The switch resolved without waiting for getContextUsage.
       expect(session.query.getContextUsage).toHaveBeenCalledOnce();
       expect(session.query.getContextUsage).toHaveBeenCalledWith({ detail: "summary" });
-      // The fork seeds the unknown default (0) until the background read lands.
-      expect(session.contextWindowSize).toBe(0);
+      expect(session.contextWindowSize).toBe(1_000_000);
       expect(session.contextWindowAuthoritative).toBe(false);
 
       answer({ rawMaxTokens: 967000 });

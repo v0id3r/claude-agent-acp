@@ -2176,8 +2176,7 @@ describe("createSession options merging", () => {
       const response = await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
 
       expect(ctxSpy).toHaveBeenCalledOnce();
-      // The fork's unknown default is 0 until the background read lands.
-      expect(sessionFor(response.sessionId).contextWindowSize).toBe(0);
+      expect(sessionFor(response.sessionId).contextWindowSize).toBe(1_000_000);
       expect(sessionFor(response.sessionId).contextWindowAuthoritative).toBe(false);
     });
 
@@ -2207,8 +2206,7 @@ describe("createSession options merging", () => {
       await vi.waitFor(() => expect(ctxSpy).toHaveBeenCalled());
       await new Promise((resolve) => setImmediate(resolve));
 
-      // The fork's unknown default is 0 until the background read lands.
-      expect(sessionFor(response.sessionId).contextWindowSize).toBe(0);
+      expect(sessionFor(response.sessionId).contextWindowSize).toBe(1_000_000);
       expect(sessionFor(response.sessionId).contextWindowAuthoritative).toBe(false);
     });
 

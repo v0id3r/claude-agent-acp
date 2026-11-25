@@ -30,8 +30,14 @@ export const ZERO_USAGE = Object.freeze({
   cache_creation_input_tokens: 0,
 });
 
-/** Zero until Claude Code reports the model context window. */
-export const DEFAULT_CONTEXT_WINDOW = 0;
+/**
+ * The context window reported for a model until Claude Code says what it is
+ * (see `context-window.ts`): 1M, the window Claude Code itself assumes for a
+ * model id it does not know (since 2.1.323). Claude Code reports 200K for an
+ * older model such as `claude-sonnet-4-5`, and for every model under
+ * `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`.
+ */
+export const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 
 /** `_meta.quota` for work that spent `usage` in its main agent loop and
  *  `modelUsage` by model (see `turnQuotaMeta` in `v1/acp-agent.ts`). */
