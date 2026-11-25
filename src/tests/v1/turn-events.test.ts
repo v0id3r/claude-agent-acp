@@ -191,7 +191,6 @@ function system(subtype: string, sessionId: string, fields: Record<string, unkno
   return { type: "system", subtype, uuid: randomUUID(), session_id: sessionId, ...fields };
 }
 
-
 describe("turn events", () => {
   let agent: ClaudeAcpAgent;
   /** Sees each session update; the agent waits until it returns. */

@@ -307,6 +307,7 @@ import {
   contextCompactionMetadataFromBoundary,
   replayCompactSummary,
 } from "../context-compaction.js";
+import { IdleCompaction } from "../idle-compaction.js";
 import {
   clientSupportsNotices,
   collapseHookSpeaker,
@@ -622,6 +623,11 @@ async function structuredUsageMarkdown(
 const TURN_NO_RESULT_MESSAGE =
   "The turn ended without a result: the agent went idle while this prompt was still in flight " +
   "(e.g. the model stream dropped mid-turn). Any partial output may be incomplete; please retry.";
+
+/** Who started a turn. `idleCompaction` is the adapter's own `/compact` (see
+ *  `IdleCompaction`): it is not a user prompt, so it neither disarms idle
+ *  compaction, asks for a title from its prompt, nor clears the published prompt suggestion. */
+type TurnOrigin = "client" | "idleCompaction";
 
 /** One in-flight turn, started by `startTurn()`. A persistent per-session
  *  consumer (see `runConsumer`) drains the SDK query stream for the whole
@@ -1130,7 +1136,7 @@ export type Session = {
   forwardSubagentText: boolean;
   /** The ACP permission and elicitation requests that await user input.
    *  Parallel subagents can ask concurrently. Steering stays non-interrupting
-   *  while any request is open. */
+   *  while any request is open, and the idle compaction waits until none is. */
   openUserInputs?: Set<OpenUserInput>;
   /** SDK-reported context window; zero until the provider supplies it. */
   contextWindowSize: number;
@@ -1346,6 +1352,8 @@ export type Session = {
   /** The consumer's compaction lifecycle, exposed so the PostCompact hook can
    *  hand it the retained summary. */
   contextCompaction?: ContextCompactionLifecycle;
+  /** Compacts the session shortly before its one-hour prompt cache expires. */
+  idleCompaction?: IdleCompaction;
   /** Whether any top-level assistant text reached the client since the last
    *  stretch boundary. Set as a side effect of sending in the consumer's
    *  `sendUpdate`, never at an emission site; read at the terminal `result`
@@ -1719,7 +1727,7 @@ export class ClaudeAcpAgent {
    * moves the running turn to it, so the work belongs to the id, not to a
    * {@link Session}.
    */
-  private readonly foregroundWork = new Map<string, { owner: ForegroundOwner }>();
+  private readonly foregroundWork = new Map<string, ForegroundOwner>();
   /** The session index (docs/air-extensions.md, "Session index"). */
   private readonly sessionIndex = new sessionIndex.SessionIndexConnection({
     agent: this,
@@ -2457,7 +2465,7 @@ export class ClaudeAcpAgent {
    * the request with invalid params (-32602) before anything is queued:
    * `promptToClaude` would drop it.
    */
-  async prompt(params: PromptRequest): Promise<PromptResponse> {
+  async prompt(params: PromptRequest, origin: TurnOrigin = "client"): Promise<PromptResponse> {
     for (const block of params.prompt) {
       if (!SUPPORTED_PROMPT_CONTENT_TYPES.includes(block.type)) {
         throw RequestError.invalidParams(
@@ -2470,7 +2478,7 @@ export class ClaudeAcpAgent {
     const outcome = new Promise<TurnOutcome>((resolve, reject) => {
       events = { inserted() {}, ended: resolve, failed: reject };
     });
-    await this.startTurn(params, events);
+    await this.startTurn(params, events, origin);
     return outcome;
   }
 
@@ -2480,7 +2488,15 @@ export class ClaudeAcpAgent {
    * on, `events` reports how the turn goes (see {@link TurnEvents}), possibly
    * before this resolves.
    */
-  async startTurn(params: PromptRequest, events: TurnEvents): Promise<void> {
+  async startTurn(
+    params: PromptRequest,
+    events: TurnEvents,
+    origin: TurnOrigin = "client",
+  ): Promise<void> {
+    // Before the first await below: a timer that fires during those awaits
+    // would queue `/compact` right behind this prompt. The idle compaction's
+    // own turn comes from that timer, which is already cleared.
+    if (origin === "client") this.sessions[params.sessionId]?.idleCompaction?.disarm("prompt");
     const received = ++this.promptsReceived;
     while (this.providerUpdate) await this.providerUpdate;
     let session = this.sessions[params.sessionId];
@@ -2593,14 +2609,20 @@ export class ClaudeAcpAgent {
     const localCommand = this.localCommandMarkdown(params);
     const localCommandAbort = localCommand ? new AbortController() : undefined;
 
-    // The prompt the previous turn predicted is spent: the user either sent it
-    // or sent something else. Clearing it here keeps a turn that predicts
-    // nothing (the CLI predicts none in plan mode, after an API error, or at
-    // the usage limit) from leaving the stale prediction in the composer. A
-    // session that holds no prediction needs no clear, and the prompt path
-    // then keeps the ordering it has without this feature.
-    const cleared = session.promptSuggestions?.clear();
-    if (cleared?.length) await this.publishPromptSuggestions(params.sessionId, cleared);
+    // An idle compaction is not something the user sent: it must not title the
+    // session `/compact` or spend the prediction the user is still looking at.
+    if (origin === "client") {
+      session.titles.onPrompt(params.prompt);
+
+      // The prompt the previous turn predicted is spent: the user either sent it
+      // or sent something else. Clearing it here keeps a turn that predicts
+      // nothing (the CLI predicts none in plan mode, after an API error, or at
+      // the usage limit) from leaving the stale prediction in the composer. A
+      // session that holds no prediction needs no clear, and the prompt path
+      // then keeps the ordering it has without this feature.
+      const cleared = session.promptSuggestions?.clear();
+      if (cleared?.length) await this.publishPromptSuggestions(params.sessionId, cleared);
+    }
 
     // A `/remote-control` command still in flight answers into the session's
     // output; wait for its reply before this prompt's turn can begin. Nothing
@@ -2657,6 +2679,7 @@ export class ClaudeAcpAgent {
     (session.sentUserUuids ??= new Set()).add(promptUuid);
     session.input.push(userMessage);
     this.ensureConsumer(session, params.sessionId);
+    if (origin === "client") session.titles.onPromptQueued(session, params.prompt);
     // The prompt is queued, so its turn goes ahead even if the client misses
     // the goal it sets; the turn's events report the outcome.
     await this.publishGoalFromPrompt(params.sessionId, firstText, promptUuid).catch((error) =>
@@ -3069,7 +3092,8 @@ export class ClaudeAcpAgent {
       const subscriptionGuard = this.runClaudeSubscriptionGuard(sessionId, session);
       if (subscriptionGuard) await subscriptionGuard;
 
-      // Intentionally detached for compatibility with the existing contract.
+      // Preserve the established default for Hosts that do not opt in. This is
+      // intentionally detached for compatibility with the existing contract.
       this.prompt(promptRequest).catch((error) => {
         this.logger.error(`Session ${sessionId}: steered new turn failed: ${error}`);
       });
@@ -3090,6 +3114,7 @@ export class ClaudeAcpAgent {
     // check: the interrupt can have the CLI finalizing the aborted cycle by the
     // time the consumer next runs, and an unmarked result would settle the turn
     // (see Turn.steeredEchoes).
+    session.idleCompaction?.disarm("steer");
     (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
     (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
     // A turn already held for background subagents has a recorded outcome the
@@ -3377,6 +3402,7 @@ export class ClaudeAcpAgent {
         }
         if (!claudeMeta?.parentToolUseId) {
           session.emittedAssistantText = true;
+          session.titles.onAssistantText(update.content);
         }
       }
       await this.client.sessionUpdate(routedNotification);
@@ -4881,6 +4907,7 @@ export class ClaudeAcpAgent {
                 } else if (message.compact_result === "success") {
                   await compaction.finish(message.uuid, "completed");
                 } else if (message.compact_result === "failed") {
+                  session.idleCompaction?.noteCompactionFailed(message.compact_error);
                   await compaction.finish(message.uuid, "failed", {
                     ...(message.compact_error ? { error: message.compact_error } : {}),
                   });
@@ -4907,7 +4934,11 @@ export class ClaudeAcpAgent {
                 await compaction.finish(
                   message.uuid,
                   "completed",
-                  compactMetadata ? contextCompactionMetadataFromBoundary(compactMetadata) : {},
+                  compactMetadata
+                    ? contextCompactionMetadataFromBoundary(compactMetadata, {
+                        idleCompaction: session.idleCompaction?.isCompacting,
+                      })
+                    : {},
                   true,
                 );
                 const usedTokens = compactMetadata?.post_tokens ?? 0;
@@ -5124,6 +5155,10 @@ export class ClaudeAcpAgent {
                   // generatable; see SessionTitles.onTurnEnd.
                   await session.titles.onTurnEnd(session);
                 }
+                // After the settle block above: steered turns, held turns and
+                // autonomous cycles count as work until it settles them, and no
+                // further idle arrives to arm the timer.
+                if (message.state === "idle") session.idleCompaction?.onIdle();
                 break;
               }
               case "memory_recall": {
@@ -6434,6 +6469,15 @@ export class ClaudeAcpAgent {
                 const model = message.event.message.model;
                 if (model && model !== "<synthetic>") {
                   lastAssistantModel = model;
+                  // `message_start` arrives with the first streamed token, close to
+                  // when the provider wrote the cache. The `assistant` message
+                  // below covers a response that was not streamed (the CLI's
+                  // non-streaming fallback); its shared id keeps the per-block
+                  // messages from moving the time.
+                  session.idleCompaction?.noteRequest(
+                    message.event.message.usage,
+                    message.event.message.id || undefined,
+                  );
                 }
               } else {
                 const usage = message.event.usage;
@@ -6780,6 +6824,10 @@ export class ClaudeAcpAgent {
                 lastAssistantUsage = snapshotFromUsage(message.message.usage);
                 lastAssistantTotalUsage = totalTokens(lastAssistantUsage);
                 session.contextUsedTokens = lastAssistantTotalUsage;
+                session.idleCompaction?.noteRequest(
+                  message.message.usage,
+                  message.message.id || undefined,
+                );
               }
               lastAssistantWasUsageLimit = isSyntheticUsageLimitMessage(message.message);
               if (message.error || lastAssistantWasUsageLimit) {
@@ -7119,6 +7167,7 @@ export class ClaudeAcpAgent {
             break;
           }
           case "rate_limit_event": {
+            session.idleCompaction?.noteRateLimit(message.rate_limit_info);
             turnRateLimit = message.rate_limit_info;
             // With partial messages on, the SDK sends this before the turn's
             // first assistant frame, while there is no usage yet to send it with.
@@ -7168,6 +7217,8 @@ export class ClaudeAcpAgent {
             // dropped, so it no longer follows from anything.
             const cleared = session.promptSuggestions?.clear();
             if (cleared?.length) await this.publishPromptSuggestions(params.sessionId, cleared);
+            // The recorded request and TTL describe the dropped conversation.
+            session.idleCompaction?.reset();
             break;
           }
           case "tool_use_summary":
@@ -7418,6 +7469,7 @@ export class ClaudeAcpAgent {
       return;
     }
     session.cancelled = true;
+    session.idleCompaction?.disarm("cancel");
     // Only prompts received before this cancel are cancelled. A prompt that
     // arrives while the awaits below run is queued and runs after the cancel
     // (ACP v2: a `session/prompt` received after `session/cancel` is not
@@ -7810,6 +7862,7 @@ export class ClaudeAcpAgent {
     }
     session.consumer = undefined;
     session.contextCompaction = undefined;
+    session.idleCompaction?.dispose();
     session.settingsManager.dispose();
     session.background.queryClosed();
     session.input.end();
@@ -7885,7 +7938,7 @@ export class ClaudeAcpAgent {
       // Foreground work that no turn owns, such as a cycle that Claude Code
       // started after the endAutonomousCycle call above.
       const owner = this.foregroundWork.get(sessionId);
-      if (owner) this.endForeground(sessionId, owner.owner);
+      if (owner) this.endForeground(sessionId, owner);
     }
   }
 
@@ -8653,20 +8706,13 @@ export class ClaudeAcpAgent {
    *  `owner`: a turn takes over a cycle that Claude Code started on its own,
    *  and only the owner's end ends the work. */
   private startForeground(sessionId: string, owner: ForegroundOwner): void {
-    const current = this.foregroundWork.get(sessionId);
-    if (current) {
-      current.owner = owner;
-      return;
-    }
-    this.foregroundWork.set(sessionId, { owner });
+    this.foregroundWork.set(sessionId, owner);
   }
 
   /** End the foreground work of the session `sessionId`, if `owner` is that
    *  work. */
   private endForeground(sessionId: string, owner: ForegroundOwner): void {
-    const work = this.foregroundWork.get(sessionId);
-    if (work?.owner !== owner) return;
-    this.foregroundWork.delete(sessionId);
+    if (this.foregroundWork.get(sessionId) === owner) this.foregroundWork.delete(sessionId);
   }
 
   /** Start a model cycle that Claude Code started on its own as the foreground
@@ -8770,7 +8816,7 @@ export class ClaudeAcpAgent {
   /** Whether a model cycle that Claude Code started on its own is the session's
    *  foreground work. A turn that took a cycle over owns the work from then on. */
   private runsAutonomousCycle(sessionId: string): boolean {
-    return this.foregroundWork.get(sessionId)?.owner === AUTONOMOUS_CYCLE;
+    return this.foregroundWork.get(sessionId) === AUTONOMOUS_CYCLE;
   }
 
   /** The ACP turn that owns a root request of the session now, if any. A
@@ -9626,6 +9672,7 @@ export class ClaudeAcpAgent {
       const newModelInfo = session.modelInfos.find((m) => m.value === value);
       const modelChanged = session.models.currentModelId !== value;
       if (modelChanged) {
+        session.idleCompaction?.disarm("model change");
         // Seed the new model's context window WITHOUT awaited IPC on the
         // switch path: cached authoritative value if we've already learned it
         // (from a prior turn's `result.modelUsage`), else the default. SDK
@@ -10798,6 +10845,28 @@ export class ClaudeAcpAgent {
         promptSuggestions: PromptSuggestions.forClient(suggestionForms),
       };
       this.mcp.sessionStarted(sessionId, servedMcpServers);
+      const registered = this.sessions[sessionId];
+      registered.idleCompaction = new IdleCompaction(
+        {
+          // `openUserInputs` also covers permission requests: `requestPermission`
+          // is wrapped in `withPendingUserInput`.
+          isBusy: () =>
+            this.claudeIsWorking(sessionId, registered) ||
+            (registered.openUserInputs?.size ?? 0) > 0,
+          contextTokens: () => registered.contextUsedTokens,
+          settings: () =>
+            registered.settingsManager.getCompactionSettings(configuredSettingsObject),
+          compact: () =>
+            this.prompt(
+              { sessionId, prompt: [{ type: "text", text: "/compact" }] },
+              "idleCompaction",
+            ),
+          // The logger has no debug level.
+          log: (message) => this.logger.log(message),
+        },
+        // The CLI's own environment: process env, the client's and the provider's.
+        { env },
+      );
       timing.phase("register");
 
       return {
@@ -11376,8 +11445,7 @@ export function v1AgentApp(
     };
   const app = acpAgent({ name: "claude-code-acp" })
     .onConnect((connection) => {
-      const client = new ClientConnection(connection.client, mcp);
-      agent = new ClaudeAcpAgent(client, logger, mcp);
+      agent = new ClaudeAcpAgent(new ClientConnection(connection.client, mcp), logger, mcp);
       onAgent(agent);
     })
     .onNotification(methods.agent.mcp.message, mcp.handleNotification)
