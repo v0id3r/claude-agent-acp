@@ -5,9 +5,8 @@ plus the patches below. Keep each patch until upstream covers its contract.
 
 | Patch                     | Where                                                                            | Why it stays                                                                                                                                                                                                    |
 | ------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_session/mcp/refresh`    | `src/mcp-refresh.ts`, `refreshMcpServers`                                        | Before a turn, Jaz reconnects the native MCP servers whose configuration changed. Upstream reconnects only through the `/mcp reconnect` slash command, which is a prompt turn.                                  |
-| Context window unknown    | `src/context-window.ts`, `src/session-usage.ts`                                  | The window is `0` until Claude reports it. Upstream assumes 1,000,000. v1 also leaves the pre-turn control channel free instead of calling `getContextUsage` in the background.                               |
-| Native Default effort     | `src/session-effort.ts`, `applyConfigOptionValue`                                | The effort selector keeps `default`, so Claude Code resolves effort itself. Upstream recommends `medium` to a `recommendedValue` client and writes it to the SDK.                                               |
+| Context window matching   | `src/session-usage.ts`                                                           | `modelUsage` matches by canonical model form instead of the longest shared prefix, so a prefix cannot borrow another model's window. Default stays 0 until Claude reports it (upstream assumes 1M).            |
+| Context routing env       | `src/context-window.ts`                                                          | `CLAUDE_CODE_DISABLE_1M_CONTEXT` joins the provider-routing env vars, so per-provider caches do not cross 200K/1M lanes.                                                                                          |
 | Reported model resolution | `resolveReportedModel` in `src/session-model.ts`                                 | A model that Claude reports maps to the row with that id or resolved model, then to one that differs only by the context suffix. Upstream's preference matching can pick a sibling row.                         |
 | Terminal exit status      | `src/v2/tasks.ts`, `src/v2/terminal.ts`                                          | A background command's terminal exit carries the exit code parsed from its `task_notification` summary (`… failed with exit code 3`). Without a code the exit is empty, as upstream reports it.                 |
 | Standalone releases       | `.github/workflows/release-standalone.yml`, `script/build-standalone-release.sh` | Jaz installs platform archives that bundle Claude Code. The npm, release-please and preview workflows are upstream's and are removed. Executables use upstream's `binary-entry.ts` and disable Bun's project dotenv and bunfig autoload. |
@@ -25,25 +24,22 @@ patches below. `waitForCompletion` steering answers (0f2c6aa) are gone from the 
 upstream `_session/steering` contract (outcomes `injected`/`startedNewTurn`/`promptRequired`)
 is upstream AIR and untouched.
 
+The effort `recommendedValue` and `_session/mcp/refresh` patches are reverted to upstream as
+well: Claude Code's own effort default is not the adapter's "medium" recommendation (measured
+high on opus-4-5/sonnet-4-6 with 2.1.331), so Jaz simply does not declare `recommendedValue` to
+adapters that do not need it, and a changed MCP catalog reaches Claude through the standard
+resume, which recreates the query when the server list differs.
+
 ## Upstream test exceptions
 
 Upstream tests run unmodified except where a patch above changes the behaviour under test:
 
 | Test file | Patch | What changes |
 | --- | --- | --- |
-| `src/tests/v1/session-config-options.test.ts` | native Default effort | expectations of the recommendedValue effort flow (concrete medium, apply-on-switch) removed |
-| `src/tests/v1/acp-agent-settings.test.ts` | native Default effort | same, for settings-derived effort at session start |
-| `src/tests/v1/provider-session-configuration.test.ts` | native Default effort | automatic effort stays unpinned (`null`) across refresh/switch |
-| `src/tests/v1/ultracode-config.test.ts` | native Default effort | ultracode no longer applies the new model's effort on switch |
-| `src/tests/v1/providers.test.ts` | context window unknown | `getContextUsage` may never run; the ordering assertion tolerates the absent call |
-| `src/tests/v1/session-doubles.ts` | context window unknown | drops the removed `contextWindowAuthoritative` mock field |
 | `src/tests/model-resolution.test.ts` | reported model resolution | adds the provider-reported-variant case |
-| `src/tests/recommended-config-values.test.ts` | native Default effort | recommendedValue no longer set on the effort option |
-| `src/tests/acp-scenarios/` (compare.ts, harness.ts, snapshots) | all of the above | `withoutJazFork` strips the patches' wire differences; snapshots regenerated |
+| `src/tests/v1/acp-agent.test.ts` | context window matching | adds the shared-name-prefix window case |
+| `src/tests/acp-scenarios/` (compare.ts, harness.ts, snapshots) | patches above | `withoutJazFork` strips the patches' wire differences; snapshots regenerated |
 | `src/tests/v2/acp-v2.test.ts`, `src/tests/v2/v2.test.ts` | terminal exit status | new assertions for the exit code carried from the task notification summary |
-
-The scenario baseline comparison drops these wire differences in one call, `withoutJazFork` in
-`src/tests/acp-scenarios/compare.ts`.
 
 ## Native parity, 0.93.0-jaz.1
 

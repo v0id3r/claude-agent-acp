@@ -1,9 +1,4 @@
 import {
-  MCP_REFRESH_METHOD,
-  parseMcpRefreshRequest,
-  type McpRefreshRequest,
-} from "../mcp-refresh.js";
-import {
   agent as acpAgent,
   AgentApp,
   AuthenticateRequest,
@@ -452,6 +447,7 @@ import {
   clearContextWindowCache,
   immediateContextWindow,
   providerCacheKeyFor,
+  readContextWindow,
 } from "../context-window.js";
 import { isLoginRequiredText, resultEnd, turnErrorData } from "../result-end.js";
 import { STARTUP_FAILURE_RESULTS_ENV, startupFailureError } from "../startup-failure.js";
@@ -1138,9 +1134,23 @@ export type Session = {
    *  Parallel subagents can ask concurrently. Steering stays non-interrupting
    *  while any request is open, and the idle compaction waits until none is. */
   openUserInputs?: Set<OpenUserInput>;
-  /** SDK-reported context window; zero until the provider supplies it. */
+  /** Context window size of the session's current model, carried across
+   *  prompts so mid-stream usage_update notifications report a correct `size`
+   *  before the turn's first result message arrives. Seeded synchronously at
+   *  session creation and on model switches from the per-model cache
+   *  (DEFAULT_CONTEXT_WINDOW on a miss), refined by a background
+   *  `getContextUsage` when that seed was the default (see
+   *  `refreshContextWindowInBackground`), then confirmed — and the cache
+   *  populated — by each result's modelUsage. No awaited IPC is on these
+   *  paths (see the seeding call sites and `contextWindowCache`). */
   contextWindowSize: number;
   contextUsedTokens?: number;
+  /** Whether `contextWindowSize` came from an authoritative source (the
+   *  cross-session cache, a `result.modelUsage`, or the background
+   *  `getContextUsage`) rather than the default. The background read runs only
+   *  while it is false: the flag, not the value, tells, because an
+   *  authoritative window can equal DEFAULT_CONTEXT_WINDOW. */
+  contextWindowAuthoritative: boolean;
   /** Stable identifier of the LLM backend this session's query was created
    *  against, derived from the routing-relevant vars of the exact `env` handed
    *  to the SDK at query creation (see {@link providerCacheKeyFor}). The context
@@ -1827,17 +1837,6 @@ export class ClaudeAcpAgent {
     });
   }
 
-  async refreshMcpServers(params: McpRefreshRequest): Promise<Record<string, never>> {
-    const session = this.sessions[params.sessionId];
-    if (!session) {
-      throw RequestError.invalidParams(undefined, `Unknown session: ${params.sessionId}`);
-    }
-    for (const name of params.serverNames) {
-      await session.query.reconnectMcpServer(name);
-    }
-    return {};
-  }
-
   async initialize(request: InitializeRequest): Promise<InitializeResponse> {
     this.clientCapabilities = request.clientCapabilities;
     this.toolCallCapabilities = ToolCallClientCapabilities.from(request.clientCapabilities);
@@ -1904,7 +1903,6 @@ export class ClaudeAcpAgent {
       protocolVersion: 1,
       agentCapabilities: {
         _meta: {
-          mcpRefresh: { method: MCP_REFRESH_METHOD },
           claudeCode: {
             promptQueueing: true,
           },
@@ -5905,6 +5903,7 @@ export class ClaudeAcpAgent {
                 matchingModelUsage.usage.contextWindow > 0
               ) {
                 session.contextWindowSize = matchingModelUsage.usage.contextWindow;
+                session.contextWindowAuthoritative = true;
                 // Authoritative: fold it into the cross-session cache (see
                 // `cacheResultContextWindow`).
                 cacheResultContextWindow(
@@ -9656,6 +9655,37 @@ export class ClaudeAcpAgent {
     });
   }
 
+  /**
+   * Replace the default context window with `getContextUsage().rawMaxTokens`
+   * (`readContextWindow`), without blocking the caller. Without it, a model
+   * with a 200K window (`claude-sonnet-4-5`, or any model under
+   * `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`) would show the 1M default until the
+   * first result's modelUsage arrives. A later result still overwrites this.
+   */
+  private refreshContextWindowInBackground(sessionId: string, session: Session): void {
+    if (session.contextWindowAuthoritative) return;
+    const { query } = session;
+    const modelId = session.models.currentModelId;
+    const stillCurrent = () =>
+      this.sessions[sessionId] === session &&
+      session.query === query &&
+      session.models.currentModelId === modelId;
+    // A synchronous throw must not fail the caller either.
+    Promise.resolve()
+      .then(() => readContextWindow(query))
+      .then(
+        (window) => {
+          if (!stillCurrent() || session.contextWindowAuthoritative) return;
+          if (window === undefined) return;
+          session.contextWindowSize = window;
+          session.contextWindowAuthoritative = true;
+        },
+        (error) => {
+          if (stillCurrent()) this.logger.error("Failed to read the context window:", error);
+        },
+      );
+  }
+
   private async applyConfigOptionValue(
     sessionId: string,
     session: Session,
@@ -9682,6 +9712,7 @@ export class ClaudeAcpAgent {
         // the switch is done (`refreshContextWindowInBackground`).
         const seeded = immediateContextWindow(session.providerCacheKey, value, newModelInfo);
         session.contextWindowSize = seeded.size;
+        session.contextWindowAuthoritative = seeded.authoritative;
       }
       session.models = { ...session.models, currentModelId: value };
 
@@ -9697,15 +9728,18 @@ export class ClaudeAcpAgent {
 
       // Rebuild config options since effort levels depend on the selected
       // model (see `effortForModelSwitch`).
+      const effortOpt = session.configOptions.find((o) => o.id === EFFORT_CONFIG_ID);
       const useRecommendedValue = clientSupportsRecommendedConfigValue(this.clientCapabilities);
       const effortSwitch = effortForModelSwitch({
         state: { pinned: session.effortPinnedLevel, applied: session.appliedEffortLevel },
+        displayed: typeof effortOpt?.currentValue === "string" ? effortOpt.currentValue : undefined,
         newModelInfo,
         modelId: value,
         settings: mergeEffortSettings(
           session.settingsManager.getSettings(),
           session.effortSettingsOverride,
         ),
+        useRecommendedValue,
       });
       session.configOptions = buildConfigOptions(
         session.modes,
@@ -9744,6 +9778,7 @@ export class ClaudeAcpAgent {
         effortSwitch,
         session.configOptions.find((o) => o.id === EFFORT_CONFIG_ID),
         session.ultracodeEnabled,
+        useRecommendedValue,
         (settings) => session.query.applyFlagSettings(settings),
       );
       session.effortPinnedLevel = effort.state.pinned;
@@ -9768,6 +9803,8 @@ export class ClaudeAcpAgent {
         if (duringSetup) this.sessionModes.deferFallbackWarning(session);
         else await this.sessionModes.publishFallbackState(sessionId, session);
       }
+      // Last, so the switch's own control requests don't queue behind it.
+      if (modelChanged) this.refreshContextWindowInBackground(sessionId, session);
     } else if (configId === AGENT_CONFIG_ID) {
       // Live agent switch — no subprocess restart needed. Apply the SDK flag
       // first so a rejected control request leaves both `currentAgent` and the
@@ -9786,10 +9823,10 @@ export class ClaudeAcpAgent {
       // Apply first so a rejected control request cannot leave the displayed
       // value ahead of the SDK flag layer.
       await session.query.applyFlagSettings(effortFlagSettings(value, session.ultracodeEnabled));
-      session.appliedEffortLevel = value !== "default" ? value : undefined;
       session.configOptions = session.configOptions.map((o) =>
         o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
       );
+      session.appliedEffortLevel = value !== "default" ? value : undefined;
       // "Default" clears the flag layer (toSdkEffortLevel → null), handing
       // effort back to the CLI's persisted per-model resolution — so it
       // un-pins; any other pick pins effort for the session.
@@ -9818,7 +9855,8 @@ export class ClaudeAcpAgent {
     // (handles display names and `resolvedModel` ids). The switched-to model
     // may not be among the options — e.g. excluded by the user's
     // `availableModels` allowlist — in which case we track the raw id.
-    // `buildModelConfigOption` lists that id so the picker stays truthful.
+    // `buildModelConfigOption` then lists that id as an extra entry, so the
+    // picker shows what the SDK is running and a client can send it back.
     const resolved = resolveReportedModel(session.modelInfos, switchedModel);
     const value = resolved?.value ?? switchedModel;
     if (session.models.currentModelId === value) return;
@@ -10722,6 +10760,10 @@ export class ClaudeAcpAgent {
         disabledReason: fastModeDisabledReason,
       };
 
+      // Concrete effort must also be applied to the SDK: its automatic default
+      // need not be our "medium" recommendation. Preserve explicit SDK options
+      // and persisted settings; automatic values re-seed on every model switch.
+      // Legacy clients still leave effort resolution entirely to the CLI.
       const useRecommendedValue = clientSupportsRecommendedConfigValue(this.clientCapabilities);
       const effortSettings = mergeEffortSettings(
         settingsManager.getSettings(),
@@ -10761,9 +10803,21 @@ export class ClaudeAcpAgent {
         return { sessionId, modes, configOptions };
       }
       const initialEffort = configOptions.find((option) => option.id === EFFORT_CONFIG_ID);
-      // Seed only from prior provider reports; a cache miss stays unknown.
-      // A fallback sibling can name a different context lane, so use the
-      // live model id when no allowlisted entry describes it.
+      if (useRecommendedValue && typeof initialEffort?.currentValue === "string") {
+        await q.applyFlagSettings(effortFlagSettings(initialEffort.currentValue, ultracodeEnabled));
+      }
+      // Seed the context window without awaited IPC. The cached authoritative
+      // window from a prior turn wins (`result.modelUsage`, cross-session),
+      // then the default. The default is replaced by a background
+      // getContextUsage once the session is registered
+      // (`refreshContextWindowInBackground`, issue #596); the authoritative
+      // window then arrives on the first `result.modelUsage` and is cached
+      // from there.
+      //
+      // The cache lookup is deliberately keyed to the allowlisted entry: a
+      // fallback-resolved sibling's resolvedModel can name a different context
+      // lane than the verbatim live id (e.g. an "opus[1m]" row matched for a
+      // bare 200k id), so on the fallback path the lookup uses the id itself.
       const seededWindow = immediateContextWindow(
         providerCacheKey,
         models.currentModelId,
@@ -10806,6 +10860,13 @@ export class ClaudeAcpAgent {
           initialEffort?.currentValue === userProvidedOptions.effort
             ? userProvidedOptions.effort
             : undefined,
+        appliedEffortLevel:
+          useRecommendedValue && typeof initialEffort?.currentValue === "string"
+            ? initialEffort.currentValue
+            : userProvidedOptions?.effort !== undefined &&
+                initialEffort?.currentValue === userProvidedOptions.effort
+              ? userProvidedOptions.effort
+              : undefined,
         agents,
         currentAgent,
         fastModeEnabled,
@@ -10816,6 +10877,7 @@ export class ClaudeAcpAgent {
         emitRawSDKMessages: sessionMeta?.claudeCode?.emitRawSDKMessages ?? false,
         forwardSubagentText,
         contextWindowSize: seededWindow.size,
+        contextWindowAuthoritative: seededWindow.authoritative,
         providerCacheKey,
         modelsNarrowedByGateway: resolvedProvider?.listedModels !== undefined,
         taskState,
@@ -10868,6 +10930,7 @@ export class ClaudeAcpAgent {
         { env },
       );
       timing.phase("register");
+      this.refreshContextWindowInBackground(sessionId, this.sessions[sessionId]);
 
       return {
         sessionId,
@@ -11507,11 +11570,6 @@ export function v1AgentApp(
     .onNotification(methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
     .onRequest<SteerRequest, SteerResponse>(STEER_METHOD, { parse: parseSteerRequest }, (ctx) =>
       agent.steer(ctx.params),
-    )
-    .onRequest<McpRefreshRequest, Record<string, never>>(
-      MCP_REFRESH_METHOD,
-      { parse: parseMcpRefreshRequest },
-      (ctx) => agent.refreshMcpServers(ctx.params),
     )
     .onRequest<AsyncTaskStopRequest, AsyncTaskStopResponse>(
       ASYNC_TASK_STOP_METHOD,

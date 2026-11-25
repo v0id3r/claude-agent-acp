@@ -135,7 +135,7 @@ describe("buildConfigOptions recommended values presentation", () => {
     expect(effort._meta).toBeUndefined();
   });
 
-  it("advertises the SDK model recommendation while retaining automatic effort", () => {
+  it("omits default entries and advertises concrete recommendations", () => {
     const options = buildConfigOptions(
       MODES,
       MODELS,
@@ -168,11 +168,11 @@ describe("buildConfigOptions recommended values presentation", () => {
     expect(model._meta).toEqual(recommendedMeta("sonnet"));
 
     const effort = selectOption(options, "effort");
-    expect(effort.currentValue).toBe("default");
-    expect(effort.options).toEqual(
+    expect(effort.currentValue).toBe("medium");
+    expect(effort.options).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ value: "default" })]),
     );
-    expect(effort._meta).toBeUndefined();
+    expect(effort._meta).toEqual(recommendedMeta("medium"));
   });
 
   it("preserves explicit selections while keeping independent recommendations", () => {
@@ -193,6 +193,7 @@ describe("buildConfigOptions recommended values presentation", () => {
     });
     expect(selectOption(options, "effort")).toMatchObject({
       currentValue: "high",
+      _meta: recommendedMeta("medium"),
     });
   });
 
@@ -263,7 +264,7 @@ describe("buildConfigOptions recommended values presentation", () => {
     });
   });
 
-  it("preserves automatic effort when the SDK supplies no default", () => {
+  it("uses an available effort when medium is not supported", () => {
     const infos = MODEL_INFOS.map((model) => ({
       ...model,
       supportedEffortLevels: ["high", "max"] as ModelInfo["supportedEffortLevels"],
@@ -278,8 +279,10 @@ describe("buildConfigOptions recommended values presentation", () => {
       undefined,
       RECOMMENDED_PRESENTATION,
     );
-    expect(selectOption(options, "effort")).toMatchObject({ currentValue: "default" });
-    expect(selectOption(options, "effort")._meta).toBeUndefined();
+    expect(selectOption(options, "effort")).toMatchObject({
+      currentValue: "high",
+      _meta: recommendedMeta("high"),
+    });
   });
 });
 
@@ -417,19 +420,13 @@ describe("model reasoning efforts", () => {
     expect(entry(options, "opus")?._meta).toEqual(effortsMeta(["low", "medium", "high"], "medium"));
   });
 
-  it("names each model's recommendation while the effort option recommends nothing", () => {
-    // The fork leaves the effort choice to the client and Claude Code: the
-    // effort option carries no recommended value, only the model entries name
-    // one for AIR.
+  it("matches the effort option's recommendation for the current model", () => {
     const infos = MODEL_INFOS.map((model) =>
       model.value === "opus"
         ? { ...model, supportedEffortLevels: ["high", "max"] as ModelInfo["supportedEffortLevels"] }
         : model,
     );
-    for (const [currentModelId, recommended] of [
-      ["opus", "high"],
-      ["sonnet", "medium"],
-    ] as const) {
+    for (const currentModelId of ["opus", "sonnet"]) {
       const options = buildConfigOptions(
         MODES,
         { ...MODELS, currentModelId },
@@ -440,16 +437,12 @@ describe("model reasoning efforts", () => {
         undefined,
         AIR_RECOMMENDED,
       );
-      expect(entry(options, currentModelId)?._meta).toEqual(
-        expect.objectContaining({
-          jetbrains: expect.objectContaining({
-            air: expect.objectContaining({
-              reasoningEfforts: expect.objectContaining({ recommended }),
-            }),
-          }),
-        }),
-      );
-      expect(selectOption(options, "effort")._meta).toBeUndefined();
+      const recommended = (
+        entry(options, currentModelId)?._meta as {
+          jetbrains: { air: { reasoningEfforts: { recommended: string } } };
+        }
+      ).jetbrains.air.reasoningEfforts.recommended;
+      expect(selectOption(options, "effort")._meta).toEqual(recommendedMeta(recommended));
     }
   });
 

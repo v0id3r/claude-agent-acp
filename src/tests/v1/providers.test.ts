@@ -251,7 +251,7 @@ describe("providers", () => {
       },
     ]);
     expect(query.applyFlagSettings.mock.invocationCallOrder[0]).toBeLessThan(
-      query.getContextUsage.mock.invocationCallOrder[0] ?? Infinity,
+      query.getContextUsage.mock.invocationCallOrder[0],
     );
   });
 

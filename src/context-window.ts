@@ -1,8 +1,8 @@
 /**
  * The context window of a session's model, as both the v1 core and the
  * v2 core report it in `usage_update.size`: seeded without IPC when the
- * session starts or switches models and learned from each result's
- * `modelUsage`. The v2 core can also read `getContextUsage` in the background.
+ * session starts or switches models, refined by a background
+ * `getContextUsage`, and learned from each result's `modelUsage`.
  */
 import type { ModelInfo, Query } from "@anthropic-ai/claude-agent-sdk";
 import { DEFAULT_CONTEXT_WINDOW } from "./session-usage.js";

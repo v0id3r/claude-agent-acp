@@ -78,7 +78,7 @@ import {
   MODEL_CONFIG_ID,
   modelDisplayName,
   modelEntryFor,
-  resolveReportedModel,
+  resolveModelPreference,
   type SessionModelState,
 } from "../session-model.js";
 import {
@@ -283,7 +283,14 @@ export class SessionConfig {
     // The client's effort is a pin when the model offers it.
     const pinned =
       clientEffort !== undefined && shownEffort === clientEffort ? clientEffort : undefined;
-    const applied = pinned;
+    // With `recommendedValue`, the shown effort is a concrete level, which
+    // Claude Code's own default need not be: it is set on the query, as on
+    // v1. A failure fails the session's start, as on v1.
+    const applied =
+      setup.recommendedValue && typeof shownEffort === "string" ? shownEffort : pinned;
+    if (setup.recommendedValue && typeof shownEffort === "string") {
+      await query.applyFlagSettings(effortFlagSettings(shownEffort, ultracodeEnabled));
+    }
     return new SessionConfig(
       sessionId,
       query,
@@ -543,7 +550,7 @@ export class SessionConfig {
    */
   modelSwitched(model: string): Promise<boolean> {
     return this.serialized(async () => {
-      const value = resolveReportedModel(this.modelInfos, model)?.value ?? model;
+      const value = resolveModelPreference(this.modelInfos, model)?.value ?? model;
       if (this.session.models.currentModelId === value) return false;
       await this.recordModel(value);
       return true;
@@ -672,11 +679,16 @@ export class SessionConfig {
     if (this.fastModeDisabledReason === "model_not_allowed") {
       this.fastModeDisabledReason = undefined;
     }
+    const displayed = this.session.configOptions.find(
+      (option) => option.id === EFFORT_CONFIG_ID,
+    )?.currentValue;
     const effortSwitch = effortForModelSwitch({
       state: this.effort,
+      displayed: typeof displayed === "string" ? displayed : undefined,
       newModelInfo: info,
       modelId: value,
       settings: this.effortSettings(),
+      useRecommendedValue: this.recommendedValue,
     });
     const options = buildConfigOptions(
       this.session.modes,
@@ -702,6 +714,7 @@ export class SessionConfig {
       effortSwitch,
       options.find((option) => option.id === EFFORT_CONFIG_ID),
       this.ultracodeEnabled,
+      this.recommendedValue,
       (settings) => this.session.query.applyFlagSettings(settings),
     );
     this.effort = effort.state;

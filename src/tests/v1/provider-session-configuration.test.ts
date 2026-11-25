@@ -273,7 +273,7 @@ describe("provider updates preserve session configuration", { timeout: 10_000 },
     });
   });
 
-  it("leaves automatic effort to native settings across a refresh and model switch", async () => {
+  it("keeps automatic effort unpinned across a later model switch", async () => {
     const { sessionId } = await newSession({
       claudeCode: {
         options: {
@@ -282,12 +282,11 @@ describe("provider updates preserve session configuration", { timeout: 10_000 },
       },
     });
     await refresh();
-    expect(lastQuery().state.effort).toBeNull();
+    expect(lastQuery().state.effort).toBe("medium");
 
     await select(sessionId, "model", "opus");
 
-    expect(lastQuery().state.effort).toBeNull();
-    expect(current(sessionId, "effort")).toBe("high");
+    expect(lastQuery().state.effort).toBe("high");
   });
 
   it("keeps legacy pins and does not restore an explicit effort cleared by Default", async () => {
@@ -315,8 +314,8 @@ describe("provider updates preserve session configuration", { timeout: 10_000 },
 
     await refresh();
 
-    expect(current(sessionId, "effort")).toBe("default");
-    expect(lastQuery().state.effort).toBeNull();
+    expect(current(sessionId, "effort")).toBe("medium");
+    expect(lastQuery().state.effort).toBe("medium");
   });
 
   it("reports a supported effort after the catalog removes a pin", async () => {
@@ -327,8 +326,8 @@ describe("provider updates preserve session configuration", { timeout: 10_000 },
 
     await refresh();
 
-    expect(current(sessionId, "effort")).toBe("default");
-    expect(lastQuery().state.effort).toBeNull();
+    expect(current(sessionId, "effort")).toBe("medium");
+    expect(lastQuery().state.effort).toBe("medium");
   });
 
   it("reports the actual fallback when a model disappears or its switch is refused", async () => {
