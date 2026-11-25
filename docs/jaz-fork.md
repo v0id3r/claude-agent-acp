@@ -37,7 +37,9 @@ Upstream tests run unmodified except where a patch above changes the behaviour u
 | Test file | Patch | What changes |
 | --- | --- | --- |
 | `src/tests/model-resolution.test.ts` | reported model resolution | adds the provider-reported-variant case |
-| `src/tests/v1/acp-agent.test.ts` | context window matching | adds the shared-name-prefix window case |
+| `src/tests/v1/acp-agent.test.ts` | context window matching | adds the shared-name-prefix window case; size expectations read 0 until the window is reported |
+| `src/tests/v1/session-config-options.test.ts` | context window default 0 | the switched model seeds the unknown window (0), the background read refines it |
+| `src/tests/v1/create-session-options.test.ts` | context window default 0 | session creation seeds 0 until the background read lands |
 | `src/tests/acp-scenarios/` (compare.ts, harness.ts, snapshots) | patches above | `withoutJazFork` strips the patches' wire differences; snapshots regenerated |
 | `src/tests/v2/acp-v2.test.ts`, `src/tests/v2/v2.test.ts` | terminal exit status | new assertions for the exit code carried from the task notification summary |
 
