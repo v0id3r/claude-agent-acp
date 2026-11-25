@@ -150,24 +150,11 @@ function withoutJazForkDifferences(record: Recorded): Recorded {
   return copy;
 }
 
-/** A Jaz record, of a subagent or of the session's work: a `session_info_update`
- *  that carries only `_meta.jaz`. */
-function isJazRecord(record: Recorded): boolean {
-  const update = updateOf(record);
-  const meta = update?._meta as Json | undefined;
-  return (
-    update?.sessionUpdate === "session_info_update" &&
-    Object.keys(update).length === 2 &&
-    meta !== undefined &&
-    Object.keys(meta).join() === "jaz"
-  );
-}
-
-/** Both sides without the Jaz fork's intended differences. */
+/** Both sides without the fork's intended differences. */
 function withoutJazFork(baseline: Recorded[], traffic: Recorded[]) {
   return {
     baseline: baseline.map(withoutJazForkDifferences),
-    traffic: traffic.filter((record) => !isJazRecord(record)).map(withoutJazForkDifferences),
+    traffic: traffic.map(withoutJazForkDifferences),
   };
 }
 

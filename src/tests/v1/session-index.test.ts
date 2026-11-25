@@ -315,7 +315,7 @@ describe("sessionIndex negotiation", () => {
       protocolVersion: 1,
       clientCapabilities: {},
     });
-    expect(nonAir._meta).toEqual({ steering: { supported: true, waitForCompletion: true } });
+    expect(nonAir._meta).toEqual({ steering: { supported: true } });
   });
 
   it("answers method-not-found to the new methods without the capability", async () => {

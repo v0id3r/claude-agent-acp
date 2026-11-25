@@ -27379,7 +27379,6 @@ describe("turn steering (_session/steering)", () => {
     // extension contract. Idle behavior is selected per steering request.
     expect((response._meta as any)?.steering).toEqual({
       supported: true,
-      waitForCompletion: true,
     });
     expect((response._meta as any)?.jetbrains?.air?.goal).toEqual({
       version: 1,

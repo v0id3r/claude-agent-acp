@@ -552,7 +552,7 @@ describe.skipIf(baselineDir)("ACP scenarios", () => {
       const initialize = zed("session-setup").find((record) => record.kind === "initialize")!
         .payload as Record<string, any>;
       expect(initialize.agentCapabilities._meta.claudeCode).toEqual({ promptQueueing: true });
-      expect(initialize._meta).toEqual({ steering: { supported: true, waitForCompletion: true } });
+      expect(initialize._meta).toEqual({ steering: { supported: true } });
     });
 
     it("sends terminal-auth commands that rerun this adapter with --cli", () => {
@@ -604,7 +604,7 @@ describe.skipIf(baselineDir)("ACP scenarios", () => {
             goal: expect.objectContaining({ version: 1 }),
           },
         },
-        steering: { supported: true, waitForCompletion: true },
+        steering: { supported: true },
       });
       const session = air("session-setup").find((record) => record.kind === "newSession")!
         .payload as Record<string, any>;

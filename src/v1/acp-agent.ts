@@ -3,8 +3,6 @@ import {
   parseMcpRefreshRequest,
   type McpRefreshRequest,
 } from "../mcp-refresh.js";
-import { JazSubagentReporter } from "../subagents.js";
-import { autonomousCycleEnd, jazWorkState, noteTaskTakenIn, type WorkEnd } from "./work-state.js";
 import {
   agent as acpAgent,
   AgentApp,
@@ -309,7 +307,6 @@ import {
   contextCompactionMetadataFromBoundary,
   replayCompactSummary,
 } from "../context-compaction.js";
-import { IdleCompaction } from "../idle-compaction.js";
 import {
   clientSupportsNotices,
   collapseHookSpeaker,
@@ -626,17 +623,6 @@ const TURN_NO_RESULT_MESSAGE =
   "The turn ended without a result: the agent went idle while this prompt was still in flight " +
   "(e.g. the model stream dropped mid-turn). Any partial output may be incomplete; please retry.";
 
-/** Who started a turn. `idleCompaction` is the adapter's own `/compact` (see
- *  `IdleCompaction`): it is not a user prompt, so it neither disarms idle
- *  compaction, asks for a title from its prompt, nor clears the published prompt suggestion. */
-type TurnOrigin = "client" | "idleCompaction";
-
-/** A `waitForCompletion` steer waiting on the turn it joined. */
-type SteerWaiter = {
-  resolve: (outcome: TurnOutcome) => void;
-  reject: (error: unknown) => void;
-};
-
 /** One in-flight turn, started by `startTurn()`. A persistent per-session
  *  consumer (see `runConsumer`) drains the SDK query stream for the whole
  *  session and settles each Turn when that turn's outcome is known, so
@@ -843,11 +829,6 @@ type Turn = {
   /** What a steered turn settles with once its steered work has run: the outcome
    *  of its latest result, so its usage covers every cycle the turn ran. */
   steeredSettle?: TurnOutcome;
-  /** Waiters of this turn's steers that asked for `waitForCompletion`. Fed
-   *  through the turn's own resolve/reject wrappers (see startTurn), so a
-   *  waiter answers with exactly the outcome the turn's prompt response
-   *  carries. */
-  steerWaiters?: Set<SteerWaiter>;
   carriedUsage?: AccumulatedUsage;
   /** `carriedUsage`'s per-model counterpart, so a turn that survives a
    *  clear-context restart keeps the `_meta.quota` rows it earned pre-restart. */
@@ -1149,7 +1130,7 @@ export type Session = {
   forwardSubagentText: boolean;
   /** The ACP permission and elicitation requests that await user input.
    *  Parallel subagents can ask concurrently. Steering stays non-interrupting
-   *  while any request is open, and the idle compaction waits until none is. */
+   *  while any request is open. */
   openUserInputs?: Set<OpenUserInput>;
   /** SDK-reported context window; zero until the provider supplies it. */
   contextWindowSize: number;
@@ -1339,9 +1320,6 @@ export type Session = {
    *  earlier run is dropped (see `isLateTaskRun`). Run ids are per CLI
    *  process, as is a session. Bounded by `MAX_TASK_RUN_IDS`, oldest first. */
   taskRunIds?: Map<string, string>;
-  /** Jaz fork: the background tasks whose end the session's work took in
-   *  since its last v1 work report (see `noteTaskTakenIn`, `jazWorkState`). */
-  tasksTakenIn?: string[];
   /** Native ACP subagent sessions negotiated through PR #1992. Records are
    *  retained for the parent session lifetime so late child output cannot be
    *  rebound to another task after the SDK prunes its live-task registry. */
@@ -1365,13 +1343,9 @@ export type Session = {
   /** Session-owned async task controller. Prompt cancellation intentionally
    *  does not finish it because background work may outlive a prompt. */
   asyncTaskRuntime?: AsyncTaskRuntime;
-  /** Session-owned Jaz Subtasks reporter; background subagents outlive a prompt. */
-  jazSubagentReporter?: JazSubagentReporter;
   /** The consumer's compaction lifecycle, exposed so the PostCompact hook can
    *  hand it the retained summary. */
   contextCompaction?: ContextCompactionLifecycle;
-  /** Compacts the session shortly before its one-hour prompt cache expires. */
-  idleCompaction?: IdleCompaction;
   /** Whether any top-level assistant text reached the client since the last
    *  stretch boundary. Set as a side effect of sending in the consumer's
    *  `sendUpdate`, never at an emission site; read at the terminal `result`
@@ -1496,16 +1470,6 @@ function isSteeredSettleReady(
     turn.steeredSettle !== undefined &&
     !turn.steeredAwaitingResult
   );
-}
-
-/** Answer every `waitForCompletion` steer waiter of `turn`: the terminal
- *  outcome on settlement, the error on failure. Drained through the turn's
- *  own resolve/reject wrappers so both lanes share one terminal signal. */
-function settleSteerWaiters(turn: Turn, settle: (waiter: SteerWaiter) => void): void {
-  if (!turn.steerWaiters) return;
-  const waiters = [...turn.steerWaiters];
-  turn.steerWaiters.clear();
-  for (const waiter of waiters) settle(waiter);
 }
 
 /** Take a turn out of the steer lane so its settlement follows the ordinary
@@ -1755,11 +1719,7 @@ export class ClaudeAcpAgent {
    * moves the running turn to it, so the work belongs to the id, not to a
    * {@link Session}.
    */
-  private readonly foregroundWork = new Map<
-    string,
-    { owner: ForegroundOwner; events?: ReturnType<typeof jazWorkState>; awaitingUser: boolean }
-  >();
-  private readonly foregroundEvents?: (sessionId: string) => ReturnType<typeof jazWorkState>;
+  private readonly foregroundWork = new Map<string, { owner: ForegroundOwner }>();
   /** The session index (docs/air-extensions.md, "Session index"). */
   private readonly sessionIndex = new sessionIndex.SessionIndexConnection({
     agent: this,
@@ -1792,9 +1752,7 @@ export class ClaudeAcpAgent {
      * `client` serves those servers with.
      */
     private readonly mcp = new McpOverAcp(),
-    options: { foreground?: (sessionId: string) => ReturnType<typeof jazWorkState> } = {},
   ) {
-    this.foregroundEvents = options.foreground;
     this.sessions = {};
     this.client = new ChangedMetaClient(
       client,
@@ -2008,9 +1966,6 @@ export class ClaudeAcpAgent {
           : {}),
         steering: {
           supported: true,
-          // `_session/steering` answers with the joined turn's terminal
-          // stopReason and `_meta` when the request sets `waitForCompletion`.
-          waitForCompletion: true,
         },
       },
     };
@@ -2502,7 +2457,7 @@ export class ClaudeAcpAgent {
    * the request with invalid params (-32602) before anything is queued:
    * `promptToClaude` would drop it.
    */
-  async prompt(params: PromptRequest, origin: TurnOrigin = "client"): Promise<PromptResponse> {
+  async prompt(params: PromptRequest): Promise<PromptResponse> {
     for (const block of params.prompt) {
       if (!SUPPORTED_PROMPT_CONTENT_TYPES.includes(block.type)) {
         throw RequestError.invalidParams(
@@ -2515,7 +2470,7 @@ export class ClaudeAcpAgent {
     const outcome = new Promise<TurnOutcome>((resolve, reject) => {
       events = { inserted() {}, ended: resolve, failed: reject };
     });
-    await this.startTurn(params, events, origin);
+    await this.startTurn(params, events);
     return outcome;
   }
 
@@ -2525,15 +2480,7 @@ export class ClaudeAcpAgent {
    * on, `events` reports how the turn goes (see {@link TurnEvents}), possibly
    * before this resolves.
    */
-  async startTurn(
-    params: PromptRequest,
-    events: TurnEvents,
-    origin: TurnOrigin = "client",
-  ): Promise<void> {
-    // Before the first await below: a timer that fires during those awaits
-    // would queue `/compact` right behind this prompt. The idle compaction's
-    // own turn comes from that timer, which is already cleared.
-    if (origin === "client") this.sessions[params.sessionId]?.idleCompaction?.disarm("prompt");
+  async startTurn(params: PromptRequest, events: TurnEvents): Promise<void> {
     const received = ++this.promptsReceived;
     while (this.providerUpdate) await this.providerUpdate;
     let session = this.sessions[params.sessionId];
@@ -2646,20 +2593,14 @@ export class ClaudeAcpAgent {
     const localCommand = this.localCommandMarkdown(params);
     const localCommandAbort = localCommand ? new AbortController() : undefined;
 
-    // An idle compaction is not something the user sent: it must not title the
-    // session `/compact` or spend the prediction the user is still looking at.
-    if (origin === "client") {
-      session.titles.onPrompt(params.prompt);
-
-      // The prompt the previous turn predicted is spent: the user either sent it
-      // or sent something else. Clearing it here keeps a turn that predicts
-      // nothing (the CLI predicts none in plan mode, after an API error, or at
-      // the usage limit) from leaving the stale prediction in the composer. A
-      // session that holds no prediction needs no clear, and the prompt path
-      // then keeps the ordering it has without this feature.
-      const cleared = session.promptSuggestions?.clear();
-      if (cleared?.length) await this.publishPromptSuggestions(params.sessionId, cleared);
-    }
+    // The prompt the previous turn predicted is spent: the user either sent it
+    // or sent something else. Clearing it here keeps a turn that predicts
+    // nothing (the CLI predicts none in plan mode, after an API error, or at
+    // the usage limit) from leaving the stale prediction in the composer. A
+    // session that holds no prediction needs no clear, and the prompt path
+    // then keeps the ordering it has without this feature.
+    const cleared = session.promptSuggestions?.clear();
+    if (cleared?.length) await this.publishPromptSuggestions(params.sessionId, cleared);
 
     // A `/remote-control` command still in flight answers into the session's
     // output; wait for its reply before this prompt's turn can begin. Nothing
@@ -2700,16 +2641,14 @@ export class ClaudeAcpAgent {
         completeTurn = resolve;
       }),
       resolve: (outcome) => {
-        this.endForeground(params.sessionId, turn, { outcome });
+        this.endForeground(params.sessionId, turn);
         events.ended(outcome);
         completeTurn();
-        settleSteerWaiters(turn, (waiter) => waiter.resolve(outcome));
       },
       reject: (error) => {
-        this.endForeground(params.sessionId, turn, { error });
+        this.endForeground(params.sessionId, turn);
         events.failed(error);
         completeTurn();
-        settleSteerWaiters(turn, (waiter) => waiter.reject(error));
       },
     };
 
@@ -2718,7 +2657,6 @@ export class ClaudeAcpAgent {
     (session.sentUserUuids ??= new Set()).add(promptUuid);
     session.input.push(userMessage);
     this.ensureConsumer(session, params.sessionId);
-    if (origin === "client") session.titles.onPromptQueued(session, params.prompt);
     // The prompt is queued, so its turn goes ahead even if the client misses
     // the goal it sets; the turn's events report the outcome.
     await this.publishGoalFromPrompt(params.sessionId, firstText, promptUuid).catch((error) =>
@@ -3131,18 +3069,7 @@ export class ClaudeAcpAgent {
       const subscriptionGuard = this.runClaudeSubscriptionGuard(sessionId, session);
       if (subscriptionGuard) await subscriptionGuard;
 
-      if (params.waitForCompletion) {
-        // Answer with the new turn's own terminal outcome, like the prompt
-        // that runs it; a rejection propagates as this request's error.
-        const outcome = await this.prompt(promptRequest);
-        return {
-          outcome: "startedNewTurn",
-          stopReason: outcome.stopReason,
-          ...(outcome._meta ? { _meta: outcome._meta } : {}),
-        };
-      }
-      // Preserve the established default for Hosts that do not opt in. This is
-      // intentionally detached for compatibility with the existing contract.
+      // Intentionally detached for compatibility with the existing contract.
       this.prompt(promptRequest).catch((error) => {
         this.logger.error(`Session ${sessionId}: steered new turn failed: ${error}`);
       });
@@ -3162,15 +3089,7 @@ export class ClaudeAcpAgent {
     // Mark before the push and in the same synchronous section as the in-flight
     // check: the interrupt can have the CLI finalizing the aborted cycle by the
     // time the consumer next runs, and an unmarked result would settle the turn
-    // (see Turn.steeredEchoes). A completion waiter registers in the same
-    // section, so a turn unsettled at the check cannot settle before the
-    // waiter exists.
-    session.idleCompaction?.disarm("steer");
-    const completion = params.waitForCompletion
-      ? new Promise<TurnOutcome>((resolve, reject) => {
-          (turnInFlight.steerWaiters ??= new Set()).add({ resolve, reject });
-        })
-      : undefined;
+    // (see Turn.steeredEchoes).
     (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
     (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
     // A turn already held for background subagents has a recorded outcome the
@@ -3186,18 +3105,7 @@ export class ClaudeAcpAgent {
     session.input.push(userMessage);
     const firstText = params.prompt[0]?.type === "text" ? params.prompt[0].text : "";
     await this.publishGoalFromPrompt(sessionId, firstText, steeredUuid);
-    if (!completion) {
-      return { outcome: "injected" };
-    }
-    // Answer once the turn this steer joined settles; its resolve wrapper
-    // feeds this waiter the same terminal outcome the turn's prompt response
-    // carries (stopReason plus the turn's `_meta`, e.g. its usage quota).
-    const outcome = await completion;
-    return {
-      outcome: "injected",
-      stopReason: outcome.stopReason,
-      ...(outcome._meta ? { _meta: outcome._meta } : {}),
-    };
+    return { outcome: "injected" };
   }
 
   async stopAsyncTask(params: AsyncTaskStopRequest): Promise<AsyncTaskStopResponse> {
@@ -3390,17 +3298,6 @@ export class ClaudeAcpAgent {
       },
     ));
 
-    // A client with native subagent sessions gets the subagent lifecycle from
-    // its child sessions instead.
-    const jazSubagents = subagents.enabled
-      ? undefined
-      : (session.jazSubagentReporter ??= new JazSubagentReporter(
-          params.sessionId,
-          async (notification) => this.client.sessionUpdate(notification),
-          (toolCallId) =>
-            session.toolUseCache[toolCallId]?.name ?? session.resolvedToolNames?.get(toolCallId),
-        ));
-
     const compaction = new ContextCompactionLifecycle((notification) => sendUpdate(notification), {
       sessionId: params.sessionId,
       airClient: this.toolCallCapabilities.air.client,
@@ -3480,7 +3377,6 @@ export class ClaudeAcpAgent {
         }
         if (!claudeMeta?.parentToolUseId) {
           session.emittedAssistantText = true;
-          session.titles.onAssistantText(update.content);
         }
       }
       await this.client.sessionUpdate(routedNotification);
@@ -3521,14 +3417,6 @@ export class ClaudeAcpAgent {
           .catch((error) =>
             this.logger.error(
               `Session ${params.sessionId}: failed to publish terminal async task state ${context}`,
-              error,
-            ),
-          ),
-        jazSubagents
-          ?.finishAll()
-          .catch((error) =>
-            this.logger.error(
-              `Session ${params.sessionId}: failed to publish terminal Jaz subagent state ${context}`,
               error,
             ),
           ),
@@ -4009,7 +3897,6 @@ export class ClaudeAcpAgent {
       if (isSubagent && session.activeTurn && !session.activeTurn.settled) {
         (session.activeTurn.spawnedTaskIds ??= new Set()).add(taskId);
       }
-      this.syncAwaitingUser(params.sessionId);
     };
 
     /** Ends the terminal of a command that ran in the background, once its
@@ -4019,7 +3906,6 @@ export class ClaudeAcpAgent {
     /** Settles a task. */
     const settleLiveTask = (taskId: string) => {
       settleLiveBackgroundTask(session, taskId);
-      this.syncAwaitingUser(params.sessionId);
     };
 
     /** Registers a settled subagent again when the SDK resumes it without a
@@ -4101,7 +3987,7 @@ export class ClaudeAcpAgent {
       ) {
         session.activeTurn.deferredSettle = outcome;
         // The hold delays v1's answer; the turn's work ended at its result.
-        this.endForeground(params.sessionId, session.activeTurn, { outcome });
+        this.endForeground(params.sessionId, session.activeTurn);
       } else {
         await settleActive(outcome);
       }
@@ -4526,10 +4412,7 @@ export class ClaudeAcpAgent {
      *  error is the cancel's, not the work's. */
     const failAllTurns = (error: unknown) => {
       disarmForceCancel(session);
-      this.endAutonomousCycle(
-        params.sessionId,
-        session.cancelled ? { outcome: { stopReason: "cancelled" } } : { error },
-      );
+      this.endAutonomousCycle(params.sessionId);
       const active = session.activeTurn;
       const turns = active
         ? [active, ...(session.turnQueue ?? []).filter((t) => t !== active)]
@@ -4709,12 +4592,7 @@ export class ClaudeAcpAgent {
             session.cancelled ? "stopped" : "failed",
             "at end of stream",
           );
-          this.endAutonomousCycle(
-            params.sessionId,
-            session.cancelled
-              ? { outcome: { stopReason: "cancelled" } }
-              : { error: RequestError.internalError(undefined, SESSION_ENDED_MESSAGE) },
-          );
+          this.endAutonomousCycle(params.sessionId);
           await settleActive(
             session.cancelled
               ? cancelledOutcome(session, inFlight)
@@ -4880,7 +4758,6 @@ export class ClaudeAcpAgent {
         }
 
         this.startAutonomousCycle(params.sessionId, session, message);
-        noteTaskTakenIn(session, message);
 
         // From CLI 2.1.270 the state stays `running` while background agents
         // run, so a turn that their notification starts has no `running`
@@ -5004,7 +4881,6 @@ export class ClaudeAcpAgent {
                 } else if (message.compact_result === "success") {
                   await compaction.finish(message.uuid, "completed");
                 } else if (message.compact_result === "failed") {
-                  session.idleCompaction?.noteCompactionFailed(message.compact_error);
                   await compaction.finish(message.uuid, "failed", {
                     ...(message.compact_error ? { error: message.compact_error } : {}),
                   });
@@ -5031,11 +4907,7 @@ export class ClaudeAcpAgent {
                 await compaction.finish(
                   message.uuid,
                   "completed",
-                  compactMetadata
-                    ? contextCompactionMetadataFromBoundary(compactMetadata, {
-                        idleCompaction: session.idleCompaction?.isCompacting,
-                      })
-                    : {},
+                  compactMetadata ? contextCompactionMetadataFromBoundary(compactMetadata) : {},
                   true,
                 );
                 const usedTokens = compactMetadata?.post_tokens ?? 0;
@@ -5122,9 +4994,7 @@ export class ClaudeAcpAgent {
                       await asyncTasks.autonomousTurnEnded("completed");
                     }
                     await closeCycleToolCalls();
-                    this.endAutonomousCycle(params.sessionId, {
-                      outcome: { stopReason: session.cancelled ? "cancelled" : "end_turn" },
-                    });
+                    this.endAutonomousCycle(params.sessionId);
                   }
                   // A non-cancelled turn normally settled at its terminal
                   // `result` already (issue #773), and that result recorded an
@@ -5206,7 +5076,7 @@ export class ClaudeAcpAgent {
                     const steered: Turn = session.activeTurn;
                     steered.deferredSettle = outcome;
                     // A hold delays v1's answer; the turn's work ends here.
-                    this.endForeground(params.sessionId, steered, { outcome });
+                    this.endForeground(params.sessionId, steered);
                     leaveSteerLane(steered);
                     await settleDeferredIfDrained();
                   } else if (session.owedTrailingIdles > 0) {
@@ -5254,10 +5124,6 @@ export class ClaudeAcpAgent {
                   // generatable; see SessionTitles.onTurnEnd.
                   await session.titles.onTurnEnd(session);
                 }
-                // After the settle block above: steered turns, held turns and
-                // autonomous cycles count as work until it settles them, and no
-                // further idle arrives to arm the timer.
-                if (message.state === "idle") session.idleCompaction?.onIdle();
                 break;
               }
               case "memory_recall": {
@@ -5424,7 +5290,6 @@ export class ClaudeAcpAgent {
                   );
                   break;
                 }
-                await jazSubagents?.taskProgress(message);
                 await asyncTasks.taskProgress({
                   task_id: message.task_id,
                   description: message.description,
@@ -5478,7 +5343,6 @@ export class ClaudeAcpAgent {
                   },
                   sendUpdate,
                 );
-                await jazSubagents?.taskStarted(message);
                 await asyncTasks.taskStarted({
                   task_id: message.task_id,
                   task_type: message.task_type,
@@ -5521,7 +5385,6 @@ export class ClaudeAcpAgent {
                       session.liveBackgroundTasks.get(message.task_id)?.backgrounded === false,
                   },
                 );
-                await jazSubagents?.taskNotification(message);
                 await asyncTasks.taskNotification({
                   task_id: message.task_id,
                   status: message.status,
@@ -5549,14 +5412,12 @@ export class ClaudeAcpAgent {
                   );
                   break;
                 }
-                await jazSubagents?.taskUpdated(message);
                 await asyncTasks.taskUpdated(message.task_id, message.patch);
                 // A task moved to the background no longer blocks the tool
                 // call that spawned it.
                 if (message.patch.is_backgrounded !== undefined) {
                   const task = session.liveBackgroundTasks.get(message.task_id);
                   if (task) task.backgrounded = message.patch.is_backgrounded;
-                  this.syncAwaitingUser(params.sessionId);
                 }
                 // terminal-status task_updated patch and a (deduplicated)
                 // task_notification when a task settles, but only the patch is
@@ -6061,14 +5922,7 @@ export class ClaudeAcpAgent {
                   pendingExitPlanModeInterruption?.toolUseId;
               if (!continuesPlan && !(isAutonomousResult && message.num_turns === 0)) {
                 await closeCycleToolCalls();
-                this.endAutonomousCycle(
-                  params.sessionId,
-                  autonomousCycleEnd(
-                    message,
-                    resultModelUsage,
-                    session.cancelled || exitPlanInterruption || isAbortedResult(message),
-                  ),
-                );
+                this.endAutonomousCycle(params.sessionId);
               }
 
               if (session.cancelled) {
@@ -6580,15 +6434,6 @@ export class ClaudeAcpAgent {
                 const model = message.event.message.model;
                 if (model && model !== "<synthetic>") {
                   lastAssistantModel = model;
-                  // `message_start` arrives with the first streamed token, close to
-                  // when the provider wrote the cache. The `assistant` message
-                  // below covers a response that was not streamed (the CLI's
-                  // non-streaming fallback); its shared id keeps the per-block
-                  // messages from moving the time.
-                  session.idleCompaction?.noteRequest(
-                    message.event.message.usage,
-                    message.event.message.id || undefined,
-                  );
                 }
               } else {
                 const usage = message.event.usage;
@@ -6935,10 +6780,6 @@ export class ClaudeAcpAgent {
                 lastAssistantUsage = snapshotFromUsage(message.message.usage);
                 lastAssistantTotalUsage = totalTokens(lastAssistantUsage);
                 session.contextUsedTokens = lastAssistantTotalUsage;
-                session.idleCompaction?.noteRequest(
-                  message.message.usage,
-                  message.message.id || undefined,
-                );
               }
               lastAssistantWasUsageLimit = isSyntheticUsageLimitMessage(message.message);
               if (message.error || lastAssistantWasUsageLimit) {
@@ -7278,7 +7119,6 @@ export class ClaudeAcpAgent {
             break;
           }
           case "rate_limit_event": {
-            session.idleCompaction?.noteRateLimit(message.rate_limit_info);
             turnRateLimit = message.rate_limit_info;
             // With partial messages on, the SDK sends this before the turn's
             // first assistant frame, while there is no usage yet to send it with.
@@ -7307,7 +7147,6 @@ export class ClaudeAcpAgent {
             });
             subagents.clear();
             asyncTasks.clear();
-            jazSubagents?.clear();
             session.resolvedToolNames?.clear();
             session.eagerToolCallSessions?.clear();
             session.toolCallFields?.clear();
@@ -7329,8 +7168,6 @@ export class ClaudeAcpAgent {
             // dropped, so it no longer follows from anything.
             const cleared = session.promptSuggestions?.clear();
             if (cleared?.length) await this.publishPromptSuggestions(params.sessionId, cleared);
-            // The recorded request and TTL describe the dropped conversation.
-            session.idleCompaction?.reset();
             break;
           }
           case "tool_use_summary":
@@ -7581,7 +7418,6 @@ export class ClaudeAcpAgent {
       return;
     }
     session.cancelled = true;
-    session.idleCompaction?.disarm("cancel");
     // Only prompts received before this cancel are cancelled. A prompt that
     // arrives while the awaits below run is queued and runs after the cancel
     // (ACP v2: a `session/prompt` received after `session/cancel` is not
@@ -7974,7 +7810,6 @@ export class ClaudeAcpAgent {
     }
     session.consumer = undefined;
     session.contextCompaction = undefined;
-    session.idleCompaction?.dispose();
     session.settingsManager.dispose();
     session.background.queryClosed();
     session.input.end();
@@ -8003,7 +7838,7 @@ export class ClaudeAcpAgent {
     }
     // The turns end before this returns; so does a model cycle that Claude
     // Code started on its own, which no turn waits for.
-    this.endAutonomousCycle(sessionId, { outcome: { stopReason: "cancelled" } });
+    this.endAutonomousCycle(sessionId);
     // cancel() arms the force-cancel floor and interrupts gracefully, but a
     // wedged consumer only wakes when `cancelController` aborts — closeQueryStream
     // below doesn't touch it. Since we're tearing the session down anyway, wake
@@ -8050,8 +7885,7 @@ export class ClaudeAcpAgent {
       // Foreground work that no turn owns, such as a cycle that Claude Code
       // started after the endAutonomousCycle call above.
       const owner = this.foregroundWork.get(sessionId);
-      if (owner)
-        this.endForeground(sessionId, owner.owner, { outcome: { stopReason: "cancelled" } });
+      if (owner) this.endForeground(sessionId, owner.owner);
     }
   }
 
@@ -8798,12 +8632,10 @@ export class ClaudeAcpAgent {
     if (!session) return request();
     const input: OpenUserInput = agentID !== undefined ? { agentID } : {};
     (session.openUserInputs ??= new Set()).add(input);
-    this.syncAwaitingUser(sessionId);
     try {
       return await request();
     } finally {
       session.openUserInputs.delete(input);
-      this.syncAwaitingUser(sessionId);
     }
   }
 
@@ -8826,32 +8658,15 @@ export class ClaudeAcpAgent {
       current.owner = owner;
       return;
     }
-    const events = this.foregroundEvents?.(sessionId);
-    this.foregroundWork.set(sessionId, { owner, events, awaitingUser: false });
-    events?.running();
-    this.syncAwaitingUser(sessionId);
+    this.foregroundWork.set(sessionId, { owner });
   }
 
   /** End the foreground work of the session `sessionId`, if `owner` is that
    *  work. */
-  private endForeground(sessionId: string, owner: ForegroundOwner, end: WorkEnd): void {
+  private endForeground(sessionId: string, owner: ForegroundOwner): void {
     const work = this.foregroundWork.get(sessionId);
     if (work?.owner !== owner) return;
     this.foregroundWork.delete(sessionId);
-    work.events?.end(end);
-  }
-
-  private syncAwaitingUser(sessionId: string): void {
-    const work = this.foregroundWork.get(sessionId);
-    const session = this.sessions[sessionId];
-    if (!work || !session || session.cancelled) return;
-    const awaitingUser = [...(session.openUserInputs ?? [])].some((input) =>
-      blocksForeground(session, input.agentID),
-    );
-    if (work.awaitingUser === awaitingUser) return;
-    work.awaitingUser = awaitingUser;
-    if (awaitingUser) work.events?.awaitingUser();
-    else work.events?.running();
   }
 
   /** Start a model cycle that Claude Code started on its own as the foreground
@@ -8948,8 +8763,8 @@ export class ClaudeAcpAgent {
 
   /** End the session's model cycle that Claude Code started on its own, if one
    *  runs. */
-  private endAutonomousCycle(sessionId: string, end: WorkEnd): void {
-    this.endForeground(sessionId, AUTONOMOUS_CYCLE, end);
+  private endAutonomousCycle(sessionId: string): void {
+    this.endForeground(sessionId, AUTONOMOUS_CYCLE);
   }
 
   /** Whether a model cycle that Claude Code started on its own is the session's
@@ -9811,7 +9626,6 @@ export class ClaudeAcpAgent {
       const newModelInfo = session.modelInfos.find((m) => m.value === value);
       const modelChanged = session.models.currentModelId !== value;
       if (modelChanged) {
-        session.idleCompaction?.disarm("model change");
         // Seed the new model's context window WITHOUT awaited IPC on the
         // switch path: cached authoritative value if we've already learned it
         // (from a prior turn's `result.modelUsage`), else the default. SDK
@@ -10984,28 +10798,6 @@ export class ClaudeAcpAgent {
         promptSuggestions: PromptSuggestions.forClient(suggestionForms),
       };
       this.mcp.sessionStarted(sessionId, servedMcpServers);
-      const registered = this.sessions[sessionId];
-      registered.idleCompaction = new IdleCompaction(
-        {
-          // `openUserInputs` also covers permission requests: `requestPermission`
-          // is wrapped in `withPendingUserInput`.
-          isBusy: () =>
-            this.claudeIsWorking(sessionId, registered) ||
-            (registered.openUserInputs?.size ?? 0) > 0,
-          contextTokens: () => registered.contextUsedTokens,
-          settings: () =>
-            registered.settingsManager.getCompactionSettings(configuredSettingsObject),
-          compact: () =>
-            this.prompt(
-              { sessionId, prompt: [{ type: "text", text: "/compact" }] },
-              "idleCompaction",
-            ),
-          // The logger has no debug level.
-          log: (message) => this.logger.log(message),
-        },
-        // The CLI's own environment: process env, the client's and the provider's.
-        { env },
-      );
       timing.phase("register");
 
       return {
@@ -11585,17 +11377,7 @@ export function v1AgentApp(
   const app = acpAgent({ name: "claude-code-acp" })
     .onConnect((connection) => {
       const client = new ClientConnection(connection.client, mcp);
-      agent = new ClaudeAcpAgent(client, logger, mcp, {
-        foreground: (sessionId) =>
-          jazWorkState(
-            sessionId,
-            (notification) =>
-              client
-                .sessionUpdate(notification)
-                .catch((error) => agent.logger.error("Failed to report Jaz work state:", error)),
-            () => agent.sessions[sessionId],
-          ),
-      });
+      agent = new ClaudeAcpAgent(client, logger, mcp);
       onAgent(agent);
     })
     .onNotification(methods.agent.mcp.message, mcp.handleNotification)
