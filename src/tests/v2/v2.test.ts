@@ -4032,8 +4032,18 @@ describe("ACP v2 core", () => {
       });
       claude.send(echo(await claude.prompt(0)));
       await prompted;
+      const previous = assistant("msg_previous", []);
+      claude.send({ ...previous, message: { ...previous.message, model: "claude-sonnet-4-6" } });
+      claude.send(result({ modelUsage: { "claude-sonnet-4-6": { contextWindow: 1_000_000 } } }));
+      await vi.waitFor(() =>
+        expect(
+          client.sessionUpdates.some(
+            (update) => update.sessionUpdate === "usage_update" && update.size === 1_000_000,
+          ),
+        ).toBe(true),
+      );
       const planned = assistant("msg_1", [{ type: "text", text: "Planned." }]);
-      // Half of the default 1M window.
+      // Half of the window Claude Code reported.
       planned.message.usage = { input_tokens: 500_000, output_tokens: 0 };
       claude.send(planned);
       await vi.waitFor(() =>

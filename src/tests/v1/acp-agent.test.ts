@@ -17308,6 +17308,46 @@ describe("usage_update computation", () => {
     expect(usageUpdate.update.size).toBe(1000000);
   });
 
+  it("does not borrow a window from another model with a shared name prefix", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      createAssistantMessage({ model: "claude-haiku-4-5-20251001" }),
+      createResultMessageWithModel({
+        modelUsage: {
+          "claude-opus-4-20250514": {
+            inputTokens: 100,
+            outputTokens: 50,
+            cacheReadInputTokens: 20,
+            cacheCreationInputTokens: 10,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 1000000,
+            maxOutputTokens: 16384,
+          },
+          "claude-sonnet-4-20250514": {
+            inputTokens: 50,
+            outputTokens: 25,
+            cacheReadInputTokens: 10,
+            cacheCreationInputTokens: 5,
+            webSearchRequests: 0,
+            costUSD: 0.005,
+            contextWindow: 200000,
+            maxOutputTokens: 16384,
+          },
+        },
+      }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    agent.sessions["test-session"].contextWindowSize = 0;
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
+    expect(usageUpdate).toBeDefined();
+    expect(usageUpdate.update.size).toBe(0);
+  });
+
   it("after model switch, size updates to the new model's window", async () => {
     const { agent, updates } = createMockAgentWithCapture();
     // Simulate: assistant on Sonnet with both models in modelUsage

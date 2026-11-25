@@ -211,36 +211,19 @@ export function snapshotFromUsage(usage: {
   };
 }
 
-function commonPrefixLength(a: string, b: string) {
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i]) {
-    i++;
-  }
-  return i;
-}
-
 export function getMatchingModelUsage(
   modelUsage: Record<string, ModelUsage>,
   currentModel: string,
 ) {
-  let bestKey: string | null = null;
-  let bestLen = 0;
-
-  for (const key of Object.keys(modelUsage)) {
-    const len = commonPrefixLength(key, currentModel);
-    if (len > bestLen) {
-      bestLen = len;
-      bestKey = key;
-    }
+  if (Object.hasOwn(modelUsage, currentModel)) {
+    return { key: currentModel, usage: modelUsage[currentModel] };
   }
-
-  if (bestKey) {
-    // `bestKey` is the SDK's resolved model id (e.g. "claude-sonnet-5[1m]"),
-    // the same spelling as ModelInfo.resolvedModel — the primary key the
-    // window is cached under. `currentModel` (the assistant message's
-    // `.model`) can be the bare form (e.g. "claude-sonnet-5"); the result
-    // handler caches under that spelling too, for seed-time reads that fall
-    // back to a bare id (rows without `resolvedModel`).
-    return { key: bestKey, usage: modelUsage[bestKey] };
+  const canonical = (model: string) => model.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "");
+  const matches = Object.keys(modelUsage).filter(
+    (key) => canonical(key) === canonical(currentModel),
+  );
+  if (matches.length === 1) {
+    const key = matches[0];
+    return { key, usage: modelUsage[key] };
   }
 }

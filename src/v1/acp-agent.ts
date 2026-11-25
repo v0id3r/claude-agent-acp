@@ -402,7 +402,7 @@ import {
   modelDisplayName,
   modelEntryFor,
   narrowToGatewayModels,
-  resolveModelPreference,
+  resolveReportedModel,
   type SessionModelState,
   withCurrentModelInfo,
 } from "../session-model.js";
@@ -10159,7 +10159,7 @@ export class ClaudeAcpAgent {
     // `availableModels` allowlist — in which case we track the raw id.
     // `buildModelConfigOption` then lists that id as an extra entry, so the
     // picker shows what the SDK is running and a client can send it back.
-    const resolved = resolveModelPreference(session.modelInfos, switchedModel);
+    const resolved = resolveReportedModel(session.modelInfos, switchedModel);
     const value = resolved?.value ?? switchedModel;
     if (session.models.currentModelId === value) return;
 
