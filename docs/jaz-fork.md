@@ -19,10 +19,28 @@ them came from the gluonfield fork without a recorded reason; with ACP v2 the pr
 the upstream title and compaction turns are kept. Jaz disables idle compaction through the client
 settings the adapter forwards (`idleCompaction: false`).
 
-The v1 wiring those patches removed (turn origin, steer waiter, the idle-compaction field) went out
-with the dropped v1 work-state in 0.111.0-jaz.1. Restoring the upstream v1 surface is a follow-up
-(see `src/tests/v1/idle-compaction-agent.test.ts` and `src/tests/v1/session-titles.test.ts`,
-removed with the patch).
+The upstream v1 surface (`src/v1/acp-agent.ts` turn origin, titles and idle-compaction wiring)
+is restored on top of v0.111.0: `git diff v0.111.0 HEAD -- src/v1` carries only the PR-able
+patches below. `waitForCompletion` steering answers (0f2c6aa) are gone from the tree; the
+upstream `_session/steering` contract (outcomes `injected`/`startedNewTurn`/`promptRequired`)
+is upstream AIR and untouched.
+
+## Upstream test exceptions
+
+Upstream tests run unmodified except where a patch above changes the behaviour under test:
+
+| Test file | Patch | What changes |
+| --- | --- | --- |
+| `src/tests/v1/session-config-options.test.ts` | native Default effort | expectations of the recommendedValue effort flow (concrete medium, apply-on-switch) removed |
+| `src/tests/v1/acp-agent-settings.test.ts` | native Default effort | same, for settings-derived effort at session start |
+| `src/tests/v1/provider-session-configuration.test.ts` | native Default effort | automatic effort stays unpinned (`null`) across refresh/switch |
+| `src/tests/v1/ultracode-config.test.ts` | native Default effort | ultracode no longer applies the new model's effort on switch |
+| `src/tests/v1/providers.test.ts` | context window unknown | `getContextUsage` may never run; the ordering assertion tolerates the absent call |
+| `src/tests/v1/session-doubles.ts` | context window unknown | drops the removed `contextWindowAuthoritative` mock field |
+| `src/tests/model-resolution.test.ts` | reported model resolution | adds the provider-reported-variant case |
+| `src/tests/recommended-config-values.test.ts` | native Default effort | recommendedValue no longer set on the effort option |
+| `src/tests/acp-scenarios/` (compare.ts, harness.ts, snapshots) | all of the above | `withoutJazFork` strips the patches' wire differences; snapshots regenerated |
+| `src/tests/v2/acp-v2.test.ts`, `src/tests/v2/v2.test.ts` | terminal exit status | new assertions for the exit code carried from the task notification summary |
 
 The scenario baseline comparison drops these wire differences in one call, `withoutJazFork` in
 `src/tests/acp-scenarios/compare.ts`.
