@@ -9,10 +9,20 @@ plus the patches below. Keep each patch until upstream covers its contract.
 | Context window unknown    | `src/context-window.ts`, `src/session-usage.ts`                                  | The window is `0` until Claude reports it. Upstream assumes 1,000,000. v1 also leaves the pre-turn control channel free instead of calling `getContextUsage` in the background.                               |
 | Native Default effort     | `src/session-effort.ts`, `applyConfigOptionValue`                                | The effort selector keeps `default`, so Claude Code resolves effort itself. Upstream recommends `medium` to a `recommendedValue` client and writes it to the SDK.                                               |
 | Reported model resolution | `resolveReportedModel` in `src/session-model.ts`                                 | A model that Claude reports maps to the row with that id or resolved model, then to one that differs only by the context suffix. Upstream's preference matching can pick a sibling row.                         |
-| Session titles            | `src/session-titles.ts`                                                          | Title inference stays with Claude Code; the adapter does not run its own title turns.                                                                                                                            |
-| Automatic compaction      | `src/context-compaction.ts`, `src/idle-compaction.ts` (removed)                  | Compaction stays Claude Code's own; the adapter runs no idle-compaction turns.                                                                                                                                   |
 | Terminal exit status      | `src/v2/tasks.ts`, `src/v2/terminal.ts`                                          | A background command's terminal exit carries the exit code parsed from its `task_notification` summary (`… failed with exit code 3`). Without a code the exit is empty, as upstream reports it.                 |
 | Standalone releases       | `.github/workflows/release-standalone.yml`, `script/build-standalone-release.sh` | Jaz installs platform archives that bundle Claude Code. The npm, release-please and preview workflows are upstream's and are removed. Executables use upstream's `binary-entry.ts` and disable Bun's project dotenv and bunfig autoload. |
+
+## Reverted to upstream
+
+Session titles and automatic compaction returned to upstream behaviour. The patches that removed
+them came from the gluonfield fork without a recorded reason; with ACP v2 the prompts are clean, so
+the upstream title and compaction turns are kept. Jaz disables idle compaction through the client
+settings the adapter forwards (`idleCompaction: false`).
+
+The v1 wiring those patches removed (turn origin, steer waiter, the idle-compaction field) went out
+with the dropped v1 work-state in 0.111.0-jaz.1. Restoring the upstream v1 surface is a follow-up
+(see `src/tests/v1/idle-compaction-agent.test.ts` and `src/tests/v1/session-titles.test.ts`,
+removed with the patch).
 
 The scenario baseline comparison drops these wire differences in one call, `withoutJazFork` in
 `src/tests/acp-scenarios/compare.ts`.
