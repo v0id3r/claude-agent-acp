@@ -3,11 +3,11 @@
 This fork is upstream [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)
 plus the patches below. Keep each patch until upstream covers its contract.
 
-| Patch                     | Where                                                                            | Why it stays                                                                                                                                                                                                    |
-| ------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Context window matching   | `src/session-usage.ts`                                                           | `modelUsage` matches by canonical model form instead of the longest shared prefix, so a prefix cannot borrow another model's window.                                                                             |
-| Reported model resolution | `resolveReportedModel` in `src/session-model.ts`                                 | A model that Claude reports maps to the row with that id or resolved model, then to one that differs only by the context suffix. Upstream's preference matching can pick a sibling row.                         |
-| Terminal exit status      | `src/v2/tasks.ts`, `src/v2/terminal.ts`                                          | A background command's terminal exit carries the exit code parsed from its `task_notification` summary (`… failed with exit code 3`). Without a code the exit is empty, as upstream reports it.                 |
+| Patch                     | Where                                                                            | Why it stays                                                                                                                                                                                                                             |
+| ------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Context window matching   | `src/session-usage.ts`                                                           | `modelUsage` matches by canonical model form instead of the longest shared prefix, so a prefix cannot borrow another model's window.                                                                                                     |
+| Reported model resolution | `resolveReportedModel` in `src/session-model.ts`                                 | A model that Claude reports maps to the row with that id or resolved model, then to one that differs only by the context suffix. Upstream's preference matching can pick a sibling row.                                                  |
+| Terminal exit status      | `src/v2/tasks.ts`, `src/v2/terminal.ts`                                          | A background command's terminal exit carries the exit code parsed from its `task_notification` summary (`… failed with exit code 3`). Without a code the exit is empty, as upstream reports it.                                          |
 | Standalone releases       | `.github/workflows/release-standalone.yml`, `script/build-standalone-release.sh` | Jaz installs platform archives that bundle Claude Code. The npm, release-please and preview workflows are upstream's and are removed. Executables use upstream's `binary-entry.ts` and disable Bun's project dotenv and bunfig autoload. |
 
 ## Reverted to upstream
@@ -33,12 +33,12 @@ resume, which recreates the query when the server list differs.
 
 Upstream tests run unmodified except where a patch above changes the behaviour under test:
 
-| Test file | Patch | What changes |
-| --- | --- | --- |
-| `src/tests/model-resolution.test.ts` | reported model resolution | adds the provider-reported-variant case |
-| `src/tests/v1/acp-agent.test.ts` | context window matching | adds the shared-name-prefix window case |
-| `src/tests/acp-scenarios/` (compare.ts, harness.ts, snapshots) | patches above | `withoutJazFork` strips the patches' wire differences; snapshots regenerated |
-| `src/tests/v2/acp-v2.test.ts`, `src/tests/v2/v2.test.ts` | terminal exit status | new assertions for the exit code carried from the task notification summary |
+| Test file                                                      | Patch                     | What changes                                                                 |
+| -------------------------------------------------------------- | ------------------------- | ---------------------------------------------------------------------------- |
+| `src/tests/model-resolution.test.ts`                           | reported model resolution | adds the provider-reported-variant case                                      |
+| `src/tests/v1/acp-agent.test.ts`                               | context window matching   | adds the shared-name-prefix window case                                      |
+| `src/tests/acp-scenarios/` (compare.ts, harness.ts, snapshots) | patches above             | `withoutJazFork` strips the patches' wire differences; snapshots regenerated |
+| `src/tests/v2/acp-v2.test.ts`, `src/tests/v2/v2.test.ts`       | terminal exit status      | new assertions for the exit code carried from the task notification summary  |
 
 ## Native parity, 0.93.0-jaz.1
 
